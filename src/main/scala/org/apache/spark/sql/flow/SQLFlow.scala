@@ -46,15 +46,27 @@ abstract class BaseSQLFlow extends PredicateHelper with Logging {
     plan: LogicalPlan,
     nodeMap: mutable.Map[String, SQLFlowGraphNode]): Seq[SQLFlowGraphEdge]
 
+  protected def normalizeRootPlan(plan: LogicalPlan): LogicalPlan = plan match {
+    case insert: InsertIntoStatement =>
+      normalizeRootPlan(insert.query)
+
+    case p if p.output.isEmpty && p.children.size == 1 =>
+      normalizeRootPlan(p.children.head)
+
+    case _ =>
+      plan
+  }
+
   def planToSQLFlow(plan: LogicalPlan, flowName: Option[String] = None)
     : (Seq[SQLFlowGraphNode], Seq[SQLFlowGraphEdge]) = {
+    val lineagePlan = normalizeRootPlan(plan)
     val nodeMap = mutable.Map[String, SQLFlowGraphNode]()
     val dstUniqId = s"query_${SQLFlow.nodeUniqueId()}"
-    val dstNodeName = flowName.getOrElse(s"query_${Math.abs(plan.semanticHash())}")
-    val outputAttrNames = plan.output.map(_.name)
-    val schema = plan.schema.toDDL
+    val dstNodeName = flowName.getOrElse(s"query_${Math.abs(lineagePlan.semanticHash())}")
+    val outputAttrNames = lineagePlan.output.map(_.name)
+    val schema = lineagePlan.schema.toDDL
     val dstNode = generateQueryNode(outputAttrNames, dstUniqId, dstNodeName, schema)
-    val edges = collectEdges(dstUniqId, plan, nodeMap)
+    val edges = collectEdges(dstUniqId, lineagePlan, nodeMap)
     (dstNode +: nodeMap.values.toSeq, edges)
   }
 
@@ -199,6 +211,136 @@ abstract class BaseSQLFlow extends PredicateHelper with Logging {
     s"${name}_${SQLFlow.nodeUniqueId()}"
   }
 
+  private def quoteJson(str: String): String = {
+    "\"" + str
+      .replace("\\", "\\\\")
+      .replace("\"", "\\\"")
+      .replace("\n", "\\n")
+      .replace("\r", "\\r")
+      .replace("\t", "\\t") + "\""
+  }
+
+  private def toJsonArray(values: Seq[String]): String = {
+    values.map(quoteJson).mkString("[", ",", "]")
+  }
+
+  private def expressionSql(expr: Expression): String = expr match {
+    case Alias(child, _) => child.sql
+    case _ => expr.sql
+  }
+
+  private def referenceNames(expr: Expression): Seq[String] = {
+    expr.references.toSeq.map(_.name).distinct.sorted
+  }
+
+  private def serializeExpression(expr: Expression): String = {
+    s"""{"expr":${quoteJson(expressionSql(expr))},"references":${toJsonArray(referenceNames(expr))}}"""
+  }
+
+  private def serializeNamedExpression(outputName: String, expr: Expression): String = {
+    s"""{"output":${quoteJson(outputName)},"expr":${quoteJson(expressionSql(expr))},"references":${toJsonArray(referenceNames(expr))}}"""
+  }
+
+  protected def serializeNamedExpressions(
+      namedExprs: Seq[NamedExpression],
+      outputs: Seq[Attribute]): String = {
+    namedExprs.zip(outputs).map { case (expr, outputAttr) =>
+      serializeNamedExpression(outputAttr.name, expr)
+    }.mkString("[", ",", "]")
+  }
+
+  private def indexedNamedExpressionProps(
+      namedExprs: Seq[NamedExpression],
+      outputs: Seq[Attribute],
+      startIdx: Int = 0): Seq[(String, String)] = {
+    namedExprs.zip(outputs).zipWithIndex.map { case ((expr, _), i) =>
+      s"${SQLFlowGraphProps.OutputExpressionByIndexPrefix}${startIdx + i}" ->
+        expressionSql(expr)
+    }
+  }
+
+  private def serializeGeneratedExpressions(
+      outputAttrs: Seq[Attribute],
+      generator: Generator): String = {
+    outputAttrs.map { attr =>
+      serializeNamedExpression(attr.name, generator)
+    }.mkString("[", ",", "]")
+  }
+
+  private def indexedGeneratedExpressionProps(
+      outputAttrs: Seq[Attribute],
+      generator: Generator,
+      startIdx: Int): Seq[(String, String)] = {
+    outputAttrs.zipWithIndex.map { case (_, i) =>
+      s"${SQLFlowGraphProps.OutputExpressionByIndexPrefix}${startIdx + i}" ->
+        expressionSql(generator)
+    }
+  }
+
+  protected def rootOutputExpressionFor(
+      plan: LogicalPlan,
+      outputIdx: Int): Option[String] = plan match {
+    case p @ Project(projList, _) if projList.indices.contains(outputIdx) =>
+      Some(serializeNamedExpression(p.output(outputIdx).name, projList(outputIdx)))
+
+    case a @ Aggregate(_, aggExprs, _) if aggExprs.indices.contains(outputIdx) =>
+      Some(serializeNamedExpression(a.output(outputIdx).name, aggExprs(outputIdx)))
+
+    case w @ Window(windowExprs, _, _, child) =>
+      val windowIdx = outputIdx - child.output.size
+      if (windowExprs.indices.contains(windowIdx)) {
+        Some(serializeNamedExpression(w.output(outputIdx).name, windowExprs(windowIdx)))
+      } else {
+        None
+      }
+
+    case g @ Generate(generator, _, _, _, generatorOutput, _) =>
+      val generatedIdx = outputIdx - g.requiredChildOutput.size
+      if (generatorOutput.indices.contains(generatedIdx)) {
+        Some(serializeNamedExpression(g.output(outputIdx).name, generator))
+      } else {
+        None
+      }
+
+    case _ =>
+      None
+  }
+
+  protected def collectConditionMetadata(plan: LogicalPlan): Seq[String] = {
+    plan.collect {
+      case Filter(cond, _) =>
+        s"""{"operator":"Filter","condition":${quoteJson(cond.sql)},"references":${toJsonArray(referenceNames(cond))}}"""
+
+      case Join(_, _, joinType, Some(cond), _) =>
+        s"""{"operator":"Join","joinType":${quoteJson(joinTypeName(joinType))},"condition":${quoteJson(cond.sql)},"references":${toJsonArray(referenceNames(cond))}}"""
+
+      case Join(_, _, joinType, None, _) =>
+        s"""{"operator":"Join","joinType":${quoteJson(joinTypeName(joinType))}}"""
+    }.distinct
+  }
+
+  protected def collectOutputExpressionMetadata(plan: LogicalPlan): Seq[String] = {
+    plan.collect {
+      case p @ Project(projList, _) =>
+        s"""{"operator":"Project","expressions":${serializeNamedExpressions(projList, p.output)}}"""
+
+      case a @ Aggregate(groupingExprs, aggExprs, _) =>
+        val props = mutable.ArrayBuffer[String]()
+        props += s""""expressions":${serializeNamedExpressions(aggExprs, a.output)}"""
+        if (groupingExprs.nonEmpty) {
+          props += s""""groupBy":${groupingExprs.map(serializeExpression).mkString("[", ",", "]")}"""
+        }
+        s"""{"operator":"Aggregate",${props.mkString(",")}}"""
+
+      case w @ Window(windowExprs, _, _, _) =>
+        val outputAttrs = w.output.takeRight(windowExprs.size)
+        s"""{"operator":"Window","expressions":${serializeNamedExpressions(windowExprs, outputAttrs)}}"""
+
+      case Generate(generator, _, _, _, generatorOutput, _) =>
+        s"""{"operator":"Generate","expressions":${serializeGeneratedExpressions(generatorOutput, generator)}}"""
+    }.distinct
+  }
+
   private def joinTypeName(jt: JoinType): String = jt match {
     case ExistenceJoin(_) => "ExistenceJoin"
     case _ => jt.toString
@@ -209,6 +351,10 @@ abstract class BaseSQLFlow extends PredicateHelper with Logging {
       (name, name)
     case TempViewNode(name, _) =>
       (name, name)
+    case SubqueryAlias(AliasIdentifier(name, qualifier), _) =>
+      val aliasName = (qualifier :+ name).mkString(".")
+      val nodeName = s"${p.nodeName}  $aliasName"
+      (nodeName, getNodeNameWithId(nodeName))
     case LogicalRelation(_, _, Some(table), false) =>
       (table.qualifiedName, table.qualifiedName)
     case HiveTableRelation(table, _, _, _, _) =>
@@ -307,10 +453,57 @@ abstract class BaseSQLFlow extends PredicateHelper with Logging {
       Nil
   }
 
+  private def collectPlanProps(p: LogicalPlan): Seq[(String, String)] = p match {
+    case Filter(cond, _) =>
+      Seq(
+        SQLFlowGraphProps.ConditionSql -> cond.sql,
+        SQLFlowGraphProps.ConditionRefs -> toJsonArray(referenceNames(cond)))
+
+    case Join(_, _, joinType, condition, _) =>
+      val props = mutable.ArrayBuffer[(String, String)](
+        SQLFlowGraphProps.JoinType -> joinTypeName(joinType))
+      condition.foreach { cond =>
+        props += SQLFlowGraphProps.JoinConditionSql -> cond.sql
+        props += SQLFlowGraphProps.JoinConditionRefs -> toJsonArray(referenceNames(cond))
+      }
+      props.toSeq
+
+    case p @ Project(projList, _) =>
+      Seq(SQLFlowGraphProps.OutputExpressions -> serializeNamedExpressions(projList, p.output)) ++
+        indexedNamedExpressionProps(projList, p.output)
+
+    case a @ Aggregate(groupingExprs, aggExprs, _) =>
+      val props = mutable.ArrayBuffer[(String, String)](
+        SQLFlowGraphProps.OutputExpressions -> serializeNamedExpressions(aggExprs, a.output))
+      props ++= indexedNamedExpressionProps(aggExprs, a.output)
+      if (groupingExprs.nonEmpty) {
+        props += SQLFlowGraphProps.GroupByExpressions ->
+          groupingExprs.map(serializeExpression).mkString("[", ",", "]")
+      }
+      props.toSeq
+
+    case w @ Window(windowExprs, _, _, _) =>
+      val outputAttrs = w.output.takeRight(windowExprs.size)
+      Seq(SQLFlowGraphProps.OutputExpressions -> serializeNamedExpressions(windowExprs, outputAttrs)) ++
+        indexedNamedExpressionProps(windowExprs, outputAttrs, w.output.size - windowExprs.size)
+
+    case g @ Generate(generator, _, _, _, generatorOutput, _) =>
+      Seq(SQLFlowGraphProps.OutputExpressions ->
+        serializeGeneratedExpressions(generatorOutput, generator)) ++
+        indexedGeneratedExpressionProps(
+          generatorOutput,
+          generator,
+          g.output.size - generatorOutput.size)
+
+    case _ =>
+      Nil
+  }
+
   private def setPlanPropsIn(node: SQLFlowGraphNode, p: LogicalPlan): Unit = {
     getCreateTime(p).foreach { t => node.props += "createTime" -> t }
     getStatsFromLeafPlan(p).foreach { kv => node.props += kv }
     node.props ++= Map("semanticHash" -> SQLFlow.semanticHash(p))
+    node.props ++= collectPlanProps(p)
   }
 
   protected def generateGraphNode(
@@ -605,6 +798,26 @@ case class SQLFlow() extends BaseSQLFlow {
 
 case class SQLContractedFlow() extends BaseSQLFlow {
 
+  private def buildContractedEdgeProps(
+      plan: LogicalPlan,
+      toIdx: Option[Int]): mutable.Map[String, String] = {
+    val props = mutable.Map[String, String]()
+    val conditionMetadata = collectConditionMetadata(plan)
+    if (conditionMetadata.nonEmpty) {
+      props += SQLFlowGraphProps.PathConditions ->
+        conditionMetadata.mkString("[", ",", "]")
+    }
+    val outputMetadata = collectOutputExpressionMetadata(plan)
+    if (outputMetadata.nonEmpty) {
+      props += SQLFlowGraphProps.PathOutputExpressions ->
+        outputMetadata.mkString("[", ",", "]")
+    }
+    toIdx.flatMap(rootOutputExpressionFor(plan, _)).foreach { expr =>
+      props += SQLFlowGraphProps.TargetOutputExpression -> expr
+    }
+    props
+  }
+
   override def collectEdges(
       tempView: String,
       plan: LogicalPlan,
@@ -615,7 +828,12 @@ case class SQLContractedFlow() extends BaseSQLFlow {
       val edges = candidates.flatMap { case ((inputNodeId, fromIdx), exprId) =>
         if (inputNodeId != tempView && outputAttrMap.contains(exprId)) {
           val toIdx = outputAttrMap(exprId)
-          Some(SQLFlowGraphEdge(inputNodeId, Some(fromIdx), tempView, Some(toIdx)))
+          Some(SQLFlowGraphEdge(
+            inputNodeId,
+            Some(fromIdx),
+            tempView,
+            Some(toIdx),
+            buildContractedEdgeProps(plan, Some(toIdx))))
         } else {
           None
         }
@@ -623,7 +841,12 @@ case class SQLContractedFlow() extends BaseSQLFlow {
       if (edges.isEmpty) {
         // TODO: Makes it more precise
         input.zipWithIndex.filter { i => refMap.contains(i._1.exprId) }.map { case (_, i) =>
-          SQLFlowGraphEdge(inputNodeId, Some(i), tempView, None)
+          SQLFlowGraphEdge(
+            inputNodeId,
+            Some(i),
+            tempView,
+            None,
+            buildContractedEdgeProps(plan, None))
         }
       } else {
         edges
@@ -762,7 +985,12 @@ case class SQLContractedFlow() extends BaseSQLFlow {
         edges ++ candidateEdges.flatMap { case ((inputNodeId, input), candidates) =>
           val edges = candidates.flatMap { case ((inputNodeId, i), exprId) =>
             if (outputAttrSet.contains(exprId)) {
-              Some(SQLFlowGraphEdge(inputNodeId, Some(i), tempView, None))
+              Some(SQLFlowGraphEdge(
+                inputNodeId,
+                Some(i),
+                tempView,
+                None,
+                buildContractedEdgeProps(ss.plan, None)))
             } else {
               None
             }
@@ -770,7 +998,12 @@ case class SQLContractedFlow() extends BaseSQLFlow {
           if (edges.isEmpty) {
             // TODO: Makes it more precise
             input.zipWithIndex.filter { i => refMap.contains(i._1.exprId) }.map { case (_, i) =>
-              SQLFlowGraphEdge(inputNodeId, Some(i), tempView, None)
+              SQLFlowGraphEdge(
+                inputNodeId,
+                Some(i),
+                tempView,
+                None,
+                buildContractedEdgeProps(ss.plan, None))
             }
           } else {
             edges

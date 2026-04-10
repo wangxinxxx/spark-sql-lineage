@@ -23,6 +23,20 @@ object GraphNodeType extends Enumeration {
   val TableNode, ViewNode, PlanNode, LeafPlanNode, QueryNode = Value
 }
 
+object SQLFlowGraphProps {
+  val ConditionSql = "conditionSql"
+  val ConditionRefs = "conditionRefs"
+  val JoinType = "joinType"
+  val JoinConditionSql = "joinConditionSql"
+  val JoinConditionRefs = "joinConditionRefs"
+  val OutputExpressions = "outputExpressions"
+  val GroupByExpressions = "groupByExpressions"
+  val OutputExpressionByIndexPrefix = "outputExpression."
+  val PathConditions = "pathConditions"
+  val PathOutputExpressions = "pathOutputExpressions"
+  val TargetOutputExpression = "targetOutputExpression"
+}
+
 case class SQLFlowGraphNode(
   uniqueId: String,
   ident: String,
@@ -50,7 +64,8 @@ case class SQLFlowGraphEdge(
   fromId: String,
   fromIdx: Option[Int],
   toId: String,
-  toIdx: Option[Int]) {
+  toIdx: Option[Int],
+  props: mutable.Map[String, String] = mutable.Map.empty) {
 
   override def toString: String = {
     val fromIdxOpt = fromIdx.map(i => s"(idx=$i)").getOrElse("")
