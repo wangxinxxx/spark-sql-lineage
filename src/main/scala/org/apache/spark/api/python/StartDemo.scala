@@ -32,6 +32,11 @@ object StartDemo {
     val DirectTableField = 3
   }
 
+  private val graphTypeOverride: Option[Int] = Some(GraphType.DirectTableField)
+//  private val graphTypeOverride: Option[Int] = Some(GraphType.Full)
+//  private val graphTypeOverride: Option[Int] = Some(GraphType.Contracted)
+//  private val graphTypeOverride: Option[Int] = None
+
   private case class MaterializedTarget(node: SQLFlowGraphNode, writeColumnNames: Seq[String])
 
   private case class LineagePlan(
@@ -39,7 +44,7 @@ object StartDemo {
       materializedTarget: Option[MaterializedTarget])
 
   def main(args: Array[String]): Unit = {
-    val graphType = parseGraphType(args)
+    val graphType = graphTypeOverride.getOrElse(GraphType.Full)
     val contracted = graphType == GraphType.Contracted
     val neo4jUri = "neo4j://127.0.0.1:7687"
     val neo4jUser = "neo4j"
@@ -57,15 +62,23 @@ object StartDemo {
       .config("spark.sql.debug.maxToStringFields", "1048576")
       .config("spark.sql.warehouse.dir", warehouseDir.toAbsolutePath().toString())
       .config("hive.metastore.uris", "thrift://hive-metsatore2.58dns.org:9083")
+      .config("spark.sql.hive.convertMetastoreParquet", "false")
       .enableHiveSupport()
       .getOrCreate()
 
     val sqlFile = new File(
 //      "src/main/resources/sql/门店-月度活跃基本信息-dm_offline_store_action_data_full_1d.sql"
-      "src/main/resources/sql/ads_bi_offline_store_operating_data_center_v3_full_1d-门店经营看板总部口径v3.sql"
-//    "src/main/resources/sql/城市经营看板-黄金-tmp_recycle_gold_order_data_v3.sql"
+//      "src/main/resources/sql/ads_bi_offline_store_operating_data_center_v3_full_1d-门店经营看板总部口径v3.sql"
+//    "src/main/resources/sql/门店-月度分润数据-dm_offline_store_share_data_full_1d.sql"
 //      "src/main/resources/sql/dw_recycle_order_amt_data_full_1d.sql"
+//      "src/main/resources/sql/回收对账单-dw_trade_t_account_statement_recycle_detail_full_1d.sql"
+//    "src/main/resources/sql/门店-线下门店员工成本-dm_offline_store_emp_cost_full_1d.sql"
+//      "src/main/resources/sql/dw_recycle_order_amt_data_full_1d.sql"
+    "src/main/resources/sql/门店-回收零售收入数据-dm_offline_store_income_data_full_1d.sql"
+
     )
+
+
     val source = Source.fromFile(sqlFile, "UTF-8")
     val rawFileText = try source.mkString finally source.close()
     val outFileSuffix = LocalDate.now().minusDays(1).toString
@@ -169,21 +182,6 @@ object StartDemo {
         println(err.getClass.getName)
         println(err.getMessage)
         // scalastyle:on println
-    }
-  }
-
-  private def parseGraphType(args: Array[String]): Int = {
-    args.find(_.startsWith("--graph-type=")).map(_.split("=", 2).lift(1).getOrElse("")).map {
-      _.trim
-    } match {
-      case Some("1") => GraphType.Full
-      case Some("2") => GraphType.Contracted
-      case Some("3") => GraphType.DirectTableField
-      case Some(other) =>
-        throw new IllegalArgumentException(
-          s"Unsupported graph type '$other', expected one of: 1, 2, 3")
-      case None =>
-        GraphType.Full
     }
   }
 
