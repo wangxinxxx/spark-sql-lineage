@@ -1,4 +1,4 @@
-set start_date=2023-01-01; -- 起始日期
+--set start_date=2023-01-01; -- 起始日期
 
 with total_left  as (
     select

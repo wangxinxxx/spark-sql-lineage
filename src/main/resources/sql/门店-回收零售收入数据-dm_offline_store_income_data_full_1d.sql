@@ -2,7 +2,7 @@
 
 
 
-set start_date=2023-01-01; -- 起始日期
+-- set start_date=2023-01-01; -- 起始日期
 
 -- drop table if exists hdp_ubu_zhuanzhuan_tmp_c2b.test_dm_offline_store_income_data_full_1d;
 -- create table hdp_ubu_zhuanzhuan_tmp_c2b.test_dm_offline_store_income_data_full_1d as
