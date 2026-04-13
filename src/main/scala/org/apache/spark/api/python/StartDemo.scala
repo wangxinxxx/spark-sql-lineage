@@ -67,14 +67,20 @@ object StartDemo {
       .getOrCreate()
 
     val sqlFile = new File(
-//      "src/main/resources/sql/门店-月度活跃基本信息-dm_offline_store_action_data_full_1d.sql"
 //      "src/main/resources/sql/ads_bi_offline_store_operating_data_center_v3_full_1d-门店经营看板总部口径v3.sql"
-//    "src/main/resources/sql/门店-月度分润数据-dm_offline_store_share_data_full_1d.sql"
-//      "src/main/resources/sql/dw_recycle_order_amt_data_full_1d.sql"
 //      "src/main/resources/sql/回收对账单-dw_trade_t_account_statement_recycle_detail_full_1d.sql"
-//    "src/main/resources/sql/门店-线下门店员工成本-dm_offline_store_emp_cost_full_1d.sql"
+//      "src/main/resources/sql/城市经营看板-二奢-tmp_recycle_lux_order_data_v3.sql"
+//"src/main/resources/sql/城市经营看板-配件-tmp_recycle_fit_order_data_v2.sql"
+//"src/main/resources/sql/城市经营看板-黄金-tmp_recycle_gold_order_data_v3.sql"
+//"src/main/resources/sql/门店-回收零售收入数据-dm_offline_store_income_data_full_1d.sql"
+//      "src/main/resources/sql/门店-月度分润数据-dm_offline_store_share_data_full_1d.sql"
+//"src/main/resources/sql/门店-月度活跃基本信息-dm_offline_store_action_data_full_1d.sql"
+//"src/main/resources/sql/门店-线下门店员工成本-dm_offline_store_emp_cost_full_1d.sql"
+
 //      "src/main/resources/sql/dw_recycle_order_amt_data_full_1d.sql"
-    "src/main/resources/sql/门店-回收零售收入数据-dm_offline_store_income_data_full_1d.sql"
+//"src/main/resources/sql/hdp_ubu_zhuanzhuan_dw_c2b.dw_trade_recycle_price_full_1d.sql"
+      //      "src/main/resources/sql/回收对账单-dw_trade_t_account_statement_recycle_detail_full_1d.sql"
+
 
     )
 
@@ -84,12 +90,16 @@ object StartDemo {
     val outFileSuffix = LocalDate.now().minusDays(1).toString
     val fileText = rawFileText.replace("${outFileSuffix}", outFileSuffix)
     val statements = splitStatements(fileText)
-    val setupSqls = statements.filter(_.trim.toUpperCase.startsWith("SET "))
+    val setupSqls = statements.filter(isSetupStatement)
     val sqlText = statements.find { stmt =>
       val upper = stmt.trim.toUpperCase
-      !upper.startsWith("SET ") && !upper.startsWith("--") && upper.nonEmpty
+      upper.startsWith("INSERT ") ||
+        upper.startsWith("WITH ") ||
+        upper.startsWith("SELECT ") ||
+        upper.startsWith("CREATE TABLE ") ||
+        upper.startsWith("CREATE VIEW ")
     }.getOrElse {
-      throw new IllegalArgumentException(s"No non-SET SQL found in ${sqlFile.getAbsolutePath}")
+      throw new IllegalArgumentException(s"No lineage SQL found in ${sqlFile.getAbsolutePath}")
     }
 
     setupSqls.foreach(sparkSession.sql)
@@ -193,6 +203,16 @@ object StartDemo {
       .split("(?<=[^\\\\]);")
       .map(_.trim)
       .filter(_.nonEmpty)
+  }
+
+  private def isSetupStatement(statement: String): Boolean = {
+    val upper = statement.trim.toUpperCase
+    upper.startsWith("SET ") ||
+      upper.startsWith("ADD JAR ") ||
+      upper.startsWith("ADD FILE ") ||
+      upper.startsWith("ADD ARCHIVE ") ||
+      upper.startsWith("CREATE TEMPORARY FUNCTION ") ||
+      upper.startsWith("CREATE TEMP FUNCTION ")
   }
 
   private def resolveLineagePlan(plan: LogicalPlan): LineagePlan = plan match {

@@ -3,7 +3,7 @@
 
 
 
-add jar viewfs://58-cluster/home/hdp_58dp/udf/C2bRecyclePriceItemGetUDF2.jar;
+add jar file:///Users/zz/IdeaProjects/spark-sql-flow-plugin/src/main/resources/udf-jars/ColaUDF-0.0.1-SNAPSHOT.jar;
 create temporary function getRecyclePriceItem as 'ColaUDF.C2bRecyclePriceItemGet2';
 
 insert overwrite table hdp_ubu_zhuanzhuan_dw_c2b.dw_recycle_order_amt_data_full_1d  partition(dt='${outFileSuffix}')
@@ -366,7 +366,6 @@ from
     on tep.order_id = c.order_id
 --and tep.type = c.type
 where create_time >= 1672502400000 and total_price != 0
-
 
 
 

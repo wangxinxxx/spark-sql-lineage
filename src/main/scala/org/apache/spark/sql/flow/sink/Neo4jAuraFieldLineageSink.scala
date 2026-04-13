@@ -111,6 +111,39 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
     ownerLabel == "Table" || ownerLabel == "View"
   }
 
+  private def collectTargetTableFieldUids(
+      nodeMap: Map[String, NodeRef],
+      edges: Seq[SQLFlowGraphEdge]): Set[String] = {
+    edges.flatMap { edge =>
+      for {
+        fromIdx <- edge.fromIdx
+        toIdx <- edge.toIdx
+        fromNodeRef <- nodeMap.get(edge.fromId)
+        toNodeRef <- nodeMap.get(edge.toId)
+        fromFieldRef <- buildFieldRef(fromNodeRef, fromIdx)
+        toFieldRef <- buildFieldRef(toNodeRef, toIdx)
+        if fromFieldRef.ownerLabel == "Query" && isTableLikeOwner(toFieldRef.ownerLabel)
+      } yield {
+        toFieldRef.uid
+      }
+    }.toSet
+  }
+
+  private def appendSqlFileNameSql(enabled: Boolean): String = {
+    if (enabled) {
+      """
+        |SET field.sqlFileNames = CASE
+        |  WHEN $sqlFileName IS NULL THEN coalesce(field.sqlFileNames, [])
+        |  WHEN $sqlFileName IN coalesce(field.sqlFileNames, [])
+        |    THEN coalesce(field.sqlFileNames, [])
+        |  ELSE coalesce(field.sqlFileNames, []) + $sqlFileName
+        |END
+      """.stripMargin
+    } else {
+      ""
+    }
+  }
+
   private def graphMode(options: Map[String, String]): GraphMode.Value = {
     options.get("graphMode").map(_.trim.toLowerCase(Locale.ROOT)) match {
       case Some("direct_table_field") => GraphMode.DirectTableField
@@ -183,8 +216,10 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
   private def createFieldNodes(
       tx: Transaction,
       nodeMap: Map[String, NodeRef],
+      edges: Seq[SQLFlowGraphEdge],
       options: Map[String, String]): Unit = {
     val sqlFileName = options.get("sqlFileName").orNull
+    val targetFieldUids = collectTargetTableFieldUids(nodeMap, edges)
     nodeMap.values.foreach { nodeRef =>
       nodeRef.node.attributeNames.zipWithIndex.foreach { case (_, port) =>
         buildFieldRef(nodeRef, port).foreach { fieldRef =>
@@ -204,18 +239,7 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
               withTableName + ("outputExpression" -> expr)
             }.getOrElse(withTableName)
           }
-          val taskPropsSql =
-            if (isTableLikeOwner(fieldRef.ownerLabel)) {
-              """
-                |SET field.sqlFileNames = CASE
-                |  WHEN $sqlFileName IS NULL THEN coalesce(field.sqlFileNames, [])
-                |  WHEN $sqlFileName IN coalesce(field.sqlFileNames, []) THEN coalesce(field.sqlFileNames, [])
-                |  ELSE coalesce(field.sqlFileNames, []) + $sqlFileName
-                |END
-              """.stripMargin
-            } else {
-              ""
-            }
+          val taskPropsSql = appendSqlFileNameSql(targetFieldUids.contains(fieldRef.uid))
           tx.run(
             s"""
                |MATCH (owner:${nodeRef.label})
@@ -237,8 +261,10 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
   private def createTableFieldOnlyNodes(
       tx: Transaction,
       nodeMap: Map[String, NodeRef],
+      edges: Seq[SQLFlowGraphEdge],
       options: Map[String, String]): Unit = {
     val sqlFileName = options.get("sqlFileName").orNull
+    val targetFieldUids = collectTargetTableFieldUids(nodeMap, edges)
     nodeMap.values.filter(nodeRef => isTableLikeOwner(nodeRef.label)).foreach { nodeRef =>
       nodeRef.node.attributeNames.zipWithIndex.foreach { case (_, port) =>
         buildFieldRef(nodeRef, port).foreach { fieldRef =>
@@ -249,15 +275,11 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
             "ownerLabel" -> fieldRef.ownerLabel,
             "tableName" -> fieldRef.ownerName)
           tx.run(
-            """
-              |MERGE (field:Field {uid: $fieldUid})
-              |SET field += $fieldProps
-              |SET field.sqlFileNames = CASE
-              |  WHEN $sqlFileName IS NULL THEN coalesce(field.sqlFileNames, [])
-              |  WHEN $sqlFileName IN coalesce(field.sqlFileNames, []) THEN coalesce(field.sqlFileNames, [])
-              |  ELSE coalesce(field.sqlFileNames, []) + $sqlFileName
-              |END
-            """.stripMargin,
+            s"""
+               |MERGE (field:Field {uid: $$fieldUid})
+               |SET field += $$fieldProps
+               |${appendSqlFileNameSql(targetFieldUids.contains(fieldRef.uid))}
+             """.stripMargin,
             Values.parameters(
               "fieldUid", fieldRef.uid,
               "fieldProps", fieldProps.asJava,
@@ -330,19 +352,7 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
         buildFieldRef(nodeRef, port)
       }
     }.map { fieldRef => fieldRef.uid -> fieldRef }.toMap
-    val targetTableFieldUids = edges.flatMap { edge =>
-      for {
-        fromIdx <- edge.fromIdx
-        toIdx <- edge.toIdx
-        fromNodeRef <- nodeMap.get(edge.fromId)
-        toNodeRef <- nodeMap.get(edge.toId)
-        fromFieldRef <- buildFieldRef(fromNodeRef, fromIdx)
-        toFieldRef <- buildFieldRef(toNodeRef, toIdx)
-        if fromFieldRef.ownerLabel == "Query" && isTableLikeOwner(toFieldRef.ownerLabel)
-      } yield {
-        toFieldRef.uid
-      }
-    }.distinct
+    val targetTableFieldUids = collectTargetTableFieldUids(nodeMap, edges)
 
     def collectUpstreamTableFieldUids(targetFieldUid: String): Seq[String] = {
       val visited = mutable.Set[String](targetFieldUid)
@@ -365,7 +375,7 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
       upstreamTableFields.toSeq
     }
 
-    val directLineagePairs = targetTableFieldUids.flatMap { targetFieldUid =>
+    val directLineagePairs = targetTableFieldUids.toSeq.flatMap { targetFieldUid =>
       collectUpstreamTableFieldUids(targetFieldUid).map { upstreamFieldUid =>
         upstreamFieldUid -> targetFieldUid
       }
@@ -424,7 +434,7 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
       buf.distinct.toSeq
     }
 
-    createFieldNodes(tx, nodeMap, options)
+    createFieldNodes(tx, nodeMap, edges, options)
     createFieldEdges(tx, nodeMap, edges)
     if (enableDirectTableFieldLineage(options)) {
       createDirectTableFieldEdges(tx, nodeMap, edges, options)
@@ -452,7 +462,7 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
       edges: Seq[SQLFlowGraphEdge],
       options: Map[String, String]): Unit = {
     val nodeMap = buildNodeMap(nodes)
-    createTableFieldOnlyNodes(tx, nodeMap, options)
+    createTableFieldOnlyNodes(tx, nodeMap, edges, options)
     createDirectTableFieldEdges(tx, nodeMap, edges, options)
   }
 
