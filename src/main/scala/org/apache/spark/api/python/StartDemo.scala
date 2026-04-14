@@ -3,7 +3,6 @@ package org.apache.spark.api.python
 
 import java.io.File
 import java.nio.file.Files
-import java.time.LocalDate
 import java.util.Locale
 
 import scala.io.Source
@@ -16,7 +15,7 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.plans.logical.{InsertIntoStatement, LogicalPlan}
 import org.apache.spark.sql.execution.command.{CreateDataSourceTableAsSelectCommand, CreateViewCommand}
 import org.apache.spark.sql.execution.datasources.{InsertIntoDataSourceCommand, InsertIntoHadoopFsRelationCommand}
-import org.apache.spark.sql.flow.{GraphNodeType, SQLContractedFlow, SQLFlow, SQLFlowGraphEdge, SQLFlowGraphNode}
+import org.apache.spark.sql.flow.{GraphNodeType, SQLContractedFlow, SQLFlow, SQLFlowGraphEdge, SQLFlowGraphNode, SQLVariableSubstitutor}
 import org.apache.spark.sql.flow.sink.{GraphVizMetadataSink, GraphVizSink, Neo4jAuraFieldLineageSink}
 import org.apache.spark.sql.hive.execution.{CreateHiveTableAsSelectCommand, InsertIntoHiveTable}
 import org.apache.spark.sql.types.StructType
@@ -81,14 +80,14 @@ object StartDemo {
 //"src/main/resources/sql/hdp_ubu_zhuanzhuan_dw_c2b.dw_trade_recycle_price_full_1d.sql"
       //      "src/main/resources/sql/回收对账单-dw_trade_t_account_statement_recycle_detail_full_1d.sql"
 
-
+      "src/main/resources/sql/" +
+        "dw_trade_sale_store_pro_retail_offline_data_full_1d.sql"
     )
 
 
     val source = Source.fromFile(sqlFile, "UTF-8")
     val rawFileText = try source.mkString finally source.close()
-    val outFileSuffix = LocalDate.now().minusDays(1).toString
-    val fileText = rawFileText.replace("${outFileSuffix}", outFileSuffix)
+    val fileText = SQLVariableSubstitutor.replace(rawFileText)
     val statements = splitStatements(fileText)
     val setupSqls = statements.filter(isSetupStatement)
     val sqlText = statements.find { stmt =>
@@ -106,7 +105,6 @@ object StartDemo {
 
     // scalastyle:off println
     println(s"=== SQL file: ${sqlFile.getAbsolutePath} ===")
-    println(s"=== outFileSuffix: $outFileSuffix ===")
     println(s"=== graphType: $graphType ===")
     println("=== graphType mapping: 1=full, 2=contracted, 3=direct-table-field ===")
     println(s"=== contracted: $contracted ===")
