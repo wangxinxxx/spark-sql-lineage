@@ -29,6 +29,8 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.flow._
 
+case class Neo4jFieldLineageWriteStats(nodeCount: Int, edgeCount: Int)
+
 case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
   extends BaseGraphBatchSink with BaseGraphStreamSink with Neo4jAura with Logging {
 
@@ -95,6 +97,14 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
     nodes.map { n => n.uniqueId -> buildNodeRef(n) }.toMap
   }
 
+  private def buildFieldRefs(nodeMap: Map[String, NodeRef]): Seq[FieldRef] = {
+    nodeMap.values.flatMap { nodeRef =>
+      nodeRef.node.attributeNames.indices.flatMap { port =>
+        buildFieldRef(nodeRef, port)
+      }
+    }.toSeq
+  }
+
   private def buildFieldRef(nodeRef: NodeRef, port: Int): Option[FieldRef] = {
     nodeRef.node.attributeNames.lift(port).map { fieldName =>
       FieldRef(
@@ -109,6 +119,10 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
 
   private def isTableLikeOwner(ownerLabel: String): Boolean = {
     ownerLabel == "Table" || ownerLabel == "View"
+  }
+
+  private def tableFieldNodeCount(nodeMap: Map[String, NodeRef]): Int = {
+    buildFieldRefs(nodeMap).count(ref => isTableLikeOwner(ref.ownerLabel))
   }
 
   private def collectTargetTableFieldUids(
@@ -127,6 +141,72 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
         toFieldRef.uid
       }
     }.toSet
+  }
+
+  private def directTableFieldPairs(
+      nodeMap: Map[String, NodeRef],
+      edges: Seq[SQLFlowGraphEdge]): Seq[(String, String)] = {
+    val mappedFieldEdges = edges.flatMap { edge =>
+      for {
+        fromIdx <- edge.fromIdx
+        toIdx <- edge.toIdx
+        fromNodeRef <- nodeMap.get(edge.fromId)
+        toNodeRef <- nodeMap.get(edge.toId)
+        fromFieldRef <- buildFieldRef(fromNodeRef, fromIdx)
+        toFieldRef <- buildFieldRef(toNodeRef, toIdx)
+      } yield {
+        fromFieldRef.uid -> toFieldRef.uid
+      }
+    }
+    val reverseAdj = mappedFieldEdges.groupBy(_._2).map { case (toUid, pairs) =>
+      toUid -> pairs.map(_._1).distinct
+    }
+    val fieldRefByUid = buildFieldRefs(nodeMap).map { fieldRef =>
+      fieldRef.uid -> fieldRef
+    }.toMap
+    val targetTableFieldUids = collectTargetTableFieldUids(nodeMap, edges)
+
+    def collectUpstreamTableFieldUids(targetFieldUid: String): Seq[String] = {
+      val visited = mutable.Set[String](targetFieldUid)
+      val pending = mutable.Queue[String](targetFieldUid)
+      val upstreamTableFields = mutable.LinkedHashSet[String]()
+      while (pending.nonEmpty) {
+        val current = pending.dequeue()
+        reverseAdj.getOrElse(current, Nil).foreach { prevUid =>
+          if (!visited.contains(prevUid)) {
+            visited += prevUid
+            fieldRefByUid.get(prevUid).foreach { prevFieldRef =>
+              if (isTableLikeOwner(prevFieldRef.ownerLabel) && prevUid != targetFieldUid) {
+                upstreamTableFields += prevUid
+              }
+            }
+            pending.enqueue(prevUid)
+          }
+        }
+      }
+      upstreamTableFields.toSeq
+    }
+
+    targetTableFieldUids.toSeq.flatMap { targetFieldUid =>
+      collectUpstreamTableFieldUids(targetFieldUid).map { upstreamFieldUid =>
+        upstreamFieldUid -> targetFieldUid
+      }
+    }.distinct
+  }
+
+  def plannedWriteStats(
+      nodes: Seq[SQLFlowGraphNode],
+      edges: Seq[SQLFlowGraphEdge],
+      options: Map[String, String]): Neo4jFieldLineageWriteStats = {
+    graphMode(options) match {
+      case GraphMode.DirectTableField =>
+        val nodeMap = buildNodeMap(nodes)
+        Neo4jFieldLineageWriteStats(
+          tableFieldNodeCount(nodeMap),
+          directTableFieldPairs(nodeMap, edges).size)
+      case GraphMode.Full =>
+        Neo4jFieldLineageWriteStats(nodes.size, edges.size)
+    }
   }
 
   private def appendSqlFileNameSql(enabled: Boolean): String = {
@@ -332,54 +412,7 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
       edges: Seq[SQLFlowGraphEdge],
       options: Map[String, String]): Unit = {
     val sqlFileName = options.get("sqlFileName").orNull
-    val mappedFieldEdges = edges.flatMap { edge =>
-      for {
-        fromIdx <- edge.fromIdx
-        toIdx <- edge.toIdx
-        fromNodeRef <- nodeMap.get(edge.fromId)
-        toNodeRef <- nodeMap.get(edge.toId)
-        fromFieldRef <- buildFieldRef(fromNodeRef, fromIdx)
-        toFieldRef <- buildFieldRef(toNodeRef, toIdx)
-      } yield {
-        fromFieldRef.uid -> toFieldRef.uid
-      }
-    }
-    val reverseAdj = mappedFieldEdges.groupBy(_._2).map { case (toUid, pairs) =>
-      toUid -> pairs.map(_._1).distinct
-    }
-    val fieldRefByUid = nodeMap.values.flatMap { nodeRef =>
-      nodeRef.node.attributeNames.indices.flatMap { port =>
-        buildFieldRef(nodeRef, port)
-      }
-    }.map { fieldRef => fieldRef.uid -> fieldRef }.toMap
-    val targetTableFieldUids = collectTargetTableFieldUids(nodeMap, edges)
-
-    def collectUpstreamTableFieldUids(targetFieldUid: String): Seq[String] = {
-      val visited = mutable.Set[String](targetFieldUid)
-      val pending = mutable.Queue[String](targetFieldUid)
-      val upstreamTableFields = mutable.LinkedHashSet[String]()
-      while (pending.nonEmpty) {
-        val current = pending.dequeue()
-        reverseAdj.getOrElse(current, Nil).foreach { prevUid =>
-          if (!visited.contains(prevUid)) {
-            visited += prevUid
-            fieldRefByUid.get(prevUid).foreach { prevFieldRef =>
-              if (isTableLikeOwner(prevFieldRef.ownerLabel) && prevUid != targetFieldUid) {
-                upstreamTableFields += prevUid
-              }
-            }
-            pending.enqueue(prevUid)
-          }
-        }
-      }
-      upstreamTableFields.toSeq
-    }
-
-    val directLineagePairs = targetTableFieldUids.toSeq.flatMap { targetFieldUid =>
-      collectUpstreamTableFieldUids(targetFieldUid).map { upstreamFieldUid =>
-        upstreamFieldUid -> targetFieldUid
-      }
-    }.distinct
+    val directLineagePairs = directTableFieldPairs(nodeMap, edges)
 
     directLineagePairs.foreach { case (srcFieldUid, dstFieldUid) =>
       tx.run(

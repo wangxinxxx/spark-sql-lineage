@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.flow
 
-import java.time.{DayOfWeek, LocalDate, LocalDateTime, ZoneId}
+import java.time.{DayOfWeek, Instant, LocalDate, LocalDateTime, ZoneId}
 import java.time.format.DateTimeFormatter
 import java.time.temporal.{TemporalAdjusters, WeekFields}
 import java.util.Locale
@@ -46,9 +46,21 @@ object SQLVariableSubstitutor {
     """(['"])#(year|month|day|hour|minute|second)#\1""".r
   private val HashNumericVariablePattern = """#(year|month|day|hour|minute|second)#""".r
   private val DateFunctionPattern = """#date\(([^#]*)\):([^#]+)#""".r
-  private val BashDatePattern = """^\s*date\s+(\+[^ ]+)(?:\s+-d\s+(.+))?\s*$""".r
+  private val SetVariablePattern =
+    """(?ims)(?:^|;)\s*set\s+(?:hivevar:|hiveconf:)?(@?[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)(?=;)""".r
+  private val AtVariableReferencePattern = """@([A-Za-z_][A-Za-z0-9_]*)""".r
+  private val HiveVariablePrefixPattern = """(?i)^(hivevar|hiveconf):(.+)$""".r
+  private val BashOffsetUnits = "year|month|week|day|hour|minute|min|second|sec"
   private val BashOffsetPattern =
-    """^\s*([+-]?\d+)\s*(year|month|day|hour|minute|second)s?\s*$""".r
+    ("""(?i)^\s*([+-]?\s*\d+)\s*(?:[+-]\s*)?(""" + BashOffsetUnits + """)s?\s*$""").r
+  private val BashOffsetFindPattern =
+    ("""(?i)([+-]?\s*\d+)\s*(?:[+-]\s*)?(""" + BashOffsetUnits + """)s?\b""").r
+  private val DateTimeFindPattern =
+    """(\d{4}-\d{2}-\d{2}|\d{8})(?:[ T](\d{2}:\d{2}:\d{2}))?""".r
+  private val BashRoundedEpochPattern =
+    """(?is)^\s*date\s+-d\s+["']?@\$\(\(\s*\$\(date\s+\+%s\)\s*/\s*(\d+)\s*\*\s*(\d+)(?:\s*([+-])\s*(\d+))?\s*\)\)["']?\s+\+(.+?)\s*$""".r
+  private val BashMidnightEpochOffsetPattern =
+    """(?is)^\s*date\s+-d\s+["']?@\$\(\(\s*\$\(date\s+-d\s+"\$\(date\s+\+%Y-%m-%d\)\s+00:00:00"\s+\+%s\)\s*([+-])\s*(\d+)\s*\)\)["']?\s+\+(.+?)\s*$""".r
 
   private val DateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.ROOT)
   private val DateSuffixFormatter = DateTimeFormatter.ofPattern("yyyyMMdd", Locale.ROOT)
@@ -58,25 +70,116 @@ object SQLVariableSubstitutor {
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
 
   def replace(sqlText: String, context: SQLVariableContext = SQLVariableContext()): String = {
-    val withBash = BashPattern.replaceAllIn(sqlText, matched =>
+    val setVariables = extractSetVariables(sqlText)
+    val withVariables = replaceVariables(sqlText, context, setVariables, Set.empty)
+    val withAtVariables = replaceAtVariables(withVariables, context, setVariables)
+    BashPattern.replaceAllIn(withAtVariables, matched =>
       Regex.quoteReplacement(evaluateBashDate(matched.group(1), context)))
-    VariablePattern.replaceAllIn(withBash, matched =>
-      Regex.quoteReplacement(replaceVariable(matched.group(1), context).getOrElse(matched.matched)))
+  }
+
+  private def replaceVariables(
+      sqlText: String,
+      context: SQLVariableContext,
+      setVariables: Map[String, String],
+      resolvingSetVariables: Set[String]): String = {
+    VariablePattern.replaceAllIn(sqlText, matched => {
+      Regex.quoteReplacement(
+        replaceVariable(matched.group(1), context, setVariables, resolvingSetVariables)
+          .getOrElse(matched.matched))
+    })
   }
 
   private def replaceVariable(
       content: String,
-      context: SQLVariableContext): Option[String] = {
+      context: SQLVariableContext,
+      setVariables: Map[String, String],
+      resolvingSetVariables: Set[String]): Option[String] = {
     val key = content.trim
-    context.overrides.get(key)
+    val lookupKeys = variableLookupKeys(key)
+    lookupVariable(context.overrides, lookupKeys).map(_._2)
+      .orElse(lookupVariable(setVariables, lookupKeys).map { case (resolvedKey, value) =>
+        if (resolvingSetVariables.contains(resolvedKey)) {
+          value
+        } else {
+          replaceVariables(value, context, setVariables, resolvingSetVariables + resolvedKey)
+        }
+      })
       .orElse(namedVariables(context).get(key))
       .orElse {
-        if (looksLikeFormula(key)) {
+        if (isHiveVariableReference(key)) {
+          None
+        } else if (looksLikeDateFormat(key)) {
+          Some(formatDatePattern(key, context))
+        } else if (looksLikeFormula(key)) {
           Some(evaluateFormula(key, context))
         } else {
           None
         }
       }
+  }
+
+  private def extractSetVariables(sqlText: String): Map[String, String] = {
+    SetVariablePattern.findAllMatchIn(sqlText).flatMap { matched =>
+      val variableName = matched.group(1).trim.stripPrefix("@")
+      val value = matched.group(2).trim
+      if (variableName.nonEmpty) {
+        Some(variableName -> value)
+      } else {
+        None
+      }
+    }.flatMap { case (key, value) =>
+      Seq(
+        key -> value,
+        s"@$key" -> value,
+        s"hivevar:$key" -> value,
+        s"hiveconf:$key" -> value)
+    }.toMap
+  }
+
+  private def replaceAtVariables(
+      sqlText: String,
+      context: SQLVariableContext,
+      setVariables: Map[String, String]): String = {
+    AtVariableReferencePattern.replaceAllIn(sqlText, matched => {
+      val start = matched.start
+      if (isSetVariableDeclarationAt(sqlText, start)) {
+        matched.matched
+      } else {
+        val name = matched.group(1)
+        val value = lookupVariable(setVariables, Seq(s"@$name", name)).map(_._2)
+        Regex.quoteReplacement(value.map { text =>
+          replaceVariables(text, context, setVariables, Set(s"@$name", name))
+        }.getOrElse(matched.matched))
+      }
+    })
+  }
+
+  private def isSetVariableDeclarationAt(sqlText: String, atIndex: Int): Boolean = {
+    val previousSemicolon = sqlText.lastIndexOf(';', atIndex - 1)
+    val previousLineBreak = sqlText.lastIndexOf('\n', atIndex - 1)
+    val segmentStart = math.max(previousSemicolon, previousLineBreak) + 1
+    sqlText.substring(segmentStart, atIndex).trim.equalsIgnoreCase("set")
+  }
+
+  private def lookupVariable(
+      variables: Map[String, String],
+      keys: Seq[String]): Option[(String, String)] = {
+    keys.collectFirst {
+      case key if variables.contains(key) => key -> variables(key)
+    }
+  }
+
+  private def variableLookupKeys(key: String): Seq[String] = key match {
+    case HiveVariablePrefixPattern(_, variableName) =>
+      val name = variableName.trim
+      Seq(key, name, s"@$name", s"hivevar:$name", s"hiveconf:$name")
+    case _ =>
+      Seq(key, s"@$key", s"hivevar:$key", s"hiveconf:$key")
+  }
+
+  private def isHiveVariableReference(key: String): Boolean = key match {
+    case HiveVariablePrefixPattern(_, _) => true
+    case _ => false
   }
 
   private def namedVariables(context: SQLVariableContext): Map[String, String] = {
@@ -136,9 +239,47 @@ object SQLVariableSubstitutor {
   }
 
   private def looksLikeFormula(content: String): Boolean = {
+    val withoutStringLiterals = stripStringLiterals(content)
     content.contains("#") ||
-      content.exists(ch => "+-*/%?:<>=&|!".contains(ch)) ||
-      content.matches(".*\\b(year|month|day|hour|minute|second)\\b.*")
+      withoutStringLiterals.matches(".*\\b(year|month|day|hour|minute|second)\\b.*") ||
+      looksLikePureNumericFormula(withoutStringLiterals)
+  }
+
+  private def looksLikePureNumericFormula(content: String): Boolean = {
+    content.exists(ch => "+-*/%?:<>=&|!".contains(ch)) &&
+      content.forall(ch => ch.isDigit || ch.isWhitespace || "()+-*/%?:<>=&|!".contains(ch))
+  }
+
+  private def stripStringLiterals(content: String): String = {
+    val builder = new StringBuilder
+    var quote: Option[Char] = None
+    var index = 0
+    while (index < content.length) {
+      val ch = content.charAt(index)
+      quote match {
+        case Some(q) if ch == q =>
+          quote = None
+        case Some(_) =>
+        case None if ch == '\'' || ch == '"' =>
+          quote = Some(ch)
+        case None =>
+          builder.append(ch)
+      }
+      index += 1
+    }
+    builder.toString()
+  }
+
+  private def looksLikeDateFormat(content: String): Boolean = {
+    !content.contains("#") &&
+      content.contains("yyyy") &&
+      content.exists(ch => "MdHhmsS".contains(ch)) &&
+      content.forall(ch => ch.isLetterOrDigit || " -_:/.".contains(ch))
+  }
+
+  private def formatDatePattern(pattern: String, context: SQLVariableContext): String = {
+    val formatter = DateTimeFormatter.ofPattern(pattern, Locale.ROOT)
+    context.businessDate.atStartOfDay().format(formatter)
   }
 
   private def evaluateFormula(content: String, context: SQLVariableContext): String = {
@@ -188,30 +329,154 @@ object SQLVariableSubstitutor {
   }
 
   private def evaluateBashDate(commandText: String, context: SQLVariableContext): String = {
-    commandText match {
-      case BashDatePattern(formatText, offsetText) =>
-        val dateTime = Option(offsetText)
-          .map(stripQuotes)
-          .map(applyBashOffset(context.effectiveDateTime, _))
-          .getOrElse(context.effectiveDateTime)
-        dateTime.format(DateTimeFormatter.ofPattern(toJavaDatePattern(formatText), Locale.ROOT))
-
-      case _ =>
-        throw new IllegalArgumentException(s"Unsupported bash variable expression: $commandText")
+    evaluateRoundedEpochBashDate(commandText, context).getOrElse {
+      evaluateSimpleBashDate(commandText, context)
     }
+  }
+
+  private def evaluateRoundedEpochBashDate(
+      commandText: String,
+      context: SQLVariableContext): Option[String] = {
+    commandText match {
+      case BashRoundedEpochPattern(divisorText, multiplierText, sign, offsetText, formatPart)
+          if divisorText == multiplierText =>
+        val intervalSeconds = divisorText.toLong
+        val epochSeconds = context.effectiveDateTime.atZone(context.zoneId).toEpochSecond
+        val offsetSeconds = signedSeconds(Option(sign), Option(offsetText))
+        Some(formatEpochSeconds(
+          epochSeconds / intervalSeconds * intervalSeconds + offsetSeconds,
+          formatPart,
+          context))
+      case BashRoundedEpochPattern(divisorText, multiplierText, _, _, _) =>
+        throw new IllegalArgumentException(
+          s"Unsupported bash rounded date interval: / $divisorText * $multiplierText")
+      case BashMidnightEpochOffsetPattern(sign, offsetText, formatPart) =>
+        val midnightEpochSeconds = context.today.atStartOfDay(context.zoneId).toEpochSecond
+        Some(formatEpochSeconds(
+          midnightEpochSeconds + signedSeconds(Some(sign), Some(offsetText)),
+          formatPart,
+          context))
+      case _ =>
+        None
+    }
+  }
+
+  private def signedSeconds(sign: Option[String], secondsText: Option[String]): Long = {
+    secondsText.map { text =>
+      val seconds = text.toLong
+      sign match {
+        case Some("-") => -seconds
+        case _ => seconds
+      }
+    }.getOrElse(0L)
+  }
+
+  private def formatEpochSeconds(
+      epochSeconds: Long,
+      formatPart: String,
+      context: SQLVariableContext): String = {
+    val dateTime = LocalDateTime.ofInstant(
+      Instant.ofEpochSecond(epochSeconds),
+      context.zoneId)
+    val formatText = "+" + stripQuotes(formatPart.trim)
+    dateTime.format(DateTimeFormatter.ofPattern(toJavaDatePattern(formatText), Locale.ROOT))
+  }
+
+  private def evaluateSimpleBashDate(commandText: String, context: SQLVariableContext): String = {
+    val tokens = splitShellWords(commandText)
+    if (tokens.headOption.forall(_ != "date")) {
+      throw new IllegalArgumentException(s"Unsupported bash variable expression: $commandText")
+    }
+
+    val formatText = tokens.find(_.startsWith("+")).getOrElse {
+      throw new IllegalArgumentException(s"Unsupported bash date format: $commandText")
+    }
+    val dateText = tokens.sliding(2).find(_.head == "-d").map(_(1))
+    val dateTime = dateText
+      .map(evaluateBashDateText(_, context))
+      .getOrElse(context.effectiveDateTime)
+    dateTime.format(DateTimeFormatter.ofPattern(toJavaDatePattern(formatText), Locale.ROOT))
+  }
+
+  private def evaluateBashDateText(
+      dateText: String,
+      context: SQLVariableContext): LocalDateTime = {
+    val dateMatch = DateTimeFindPattern.findFirstMatchIn(dateText)
+    val baseDateTime = dateMatch.map { matched =>
+      val date = parseBashDate(matched.group(1))
+      Option(matched.group(2)).map { timeText =>
+        LocalDateTime.of(date, java.time.LocalTime.parse(timeText))
+      }.getOrElse(date.atStartOfDay())
+    }.getOrElse(context.effectiveDateTime)
+
+    val withoutDate = dateMatch.map { matched =>
+      dateText.substring(0, matched.start) + dateText.substring(matched.end)
+    }.getOrElse(dateText)
+    val offsets = BashOffsetFindPattern.findAllMatchIn(withoutDate).toSeq
+    val residue = BashOffsetFindPattern.replaceAllIn(withoutDate, "").trim
+
+    if (residue.nonEmpty && residue != "now" && residue != "today") {
+      throw new IllegalArgumentException(s"Unsupported bash date offset: $dateText")
+    }
+
+    offsets.foldLeft(baseDateTime) { case (dateTime, matched) =>
+      applyBashOffset(dateTime, s"${matched.group(1)} ${matched.group(2)}")
+    }
+  }
+
+  private def parseBashDate(dateText: String): LocalDate = {
+    if (dateText.contains("-")) {
+      LocalDate.parse(dateText, DateFormatter)
+    } else {
+      LocalDate.parse(dateText, DateSuffixFormatter)
+    }
+  }
+
+  private def splitShellWords(text: String): Seq[String] = {
+    val tokens = scala.collection.mutable.ArrayBuffer.empty[String]
+    val current = new StringBuilder
+    var quote: Option[Char] = None
+    var index = 0
+    while (index < text.length) {
+      val ch = text.charAt(index)
+      quote match {
+        case Some(q) if ch == q =>
+          quote = None
+        case Some(_) =>
+          current.append(ch)
+        case None if ch == '\'' || ch == '"' =>
+          quote = Some(ch)
+        case None if ch.isWhitespace =>
+          if (current.nonEmpty) {
+            tokens += current.toString()
+            current.clear()
+          }
+        case None =>
+          current.append(ch)
+      }
+      index += 1
+    }
+    if (quote.nonEmpty) {
+      throw new IllegalArgumentException(s"Unclosed quote in bash date expression: $text")
+    }
+    if (current.nonEmpty) {
+      tokens += current.toString()
+    }
+    tokens.toSeq
   }
 
   private def applyBashOffset(dateTime: LocalDateTime, offsetText: String): LocalDateTime = {
     offsetText match {
       case BashOffsetPattern(amountText, unit) =>
-        val amount = amountText.toLong
-        unit match {
+        val amount = amountText.replaceAll("\\s+", "").toLong
+        unit.toLowerCase(Locale.ROOT) match {
           case "year" => dateTime.plusYears(amount)
           case "month" => dateTime.plusMonths(amount)
+          case "week" => dateTime.plusWeeks(amount)
           case "day" => dateTime.plusDays(amount)
           case "hour" => dateTime.plusHours(amount)
-          case "minute" => dateTime.plusMinutes(amount)
-          case "second" => dateTime.plusSeconds(amount)
+          case "minute" | "min" => dateTime.plusMinutes(amount)
+          case "second" | "sec" => dateTime.plusSeconds(amount)
         }
       case "now" | "today" =>
         dateTime
