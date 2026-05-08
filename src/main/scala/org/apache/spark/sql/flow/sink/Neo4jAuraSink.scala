@@ -34,20 +34,33 @@ trait Neo4jAura {
   def user: String
   def passwd: String
 
-  protected def withSession(f: Session => Unit): Unit = {
+  protected def withDriver[T](f: Driver => T): T = {
     var driver: Driver = null
-    var session: Session = null
     try {
       driver = GraphDatabase.driver(uri, AuthTokens.basic(user, passwd), Config.defaultConfig())
+      f(driver)
+    } finally {
+      if (driver != null) {
+        driver.close()
+      }
+    }
+  }
+
+  protected def withSession[T](driver: Driver)(f: Session => T): T = {
+    var session: Session = null
+    try {
       session = driver.session()
       f(session)
     } finally {
       if (session != null) {
         session.close()
       }
-      if (driver != null) {
-        driver.close()
-      }
+    }
+  }
+
+  protected def withSession[T](f: Session => T): T = {
+    withDriver { driver =>
+      withSession(driver)(f)
     }
   }
 

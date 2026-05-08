@@ -1,0 +1,220 @@
+<?xml version="1.0"?>
+<!--
+  Licensed to the Apache Software Foundation (ASF) under one or more
+  contributor license agreements.  See the NOTICE file distributed with
+  this work for additional information regarding copyright ownership.
+  The ASF licenses this file to You under the Apache License, Version 2.0
+  (the "License"); you may not use this file except in compliance with
+  the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+
+<configuration xmlns:xi="http://www.w3.org/2001/XInclude">
+    <xi:include href="mountTable.xml" />
+
+    <property>
+        <name>fs.defaultFS</name>
+        <value>viewfs://58-cluster/</value>
+    </property>
+
+    <!-- Minimal HDFS HA config for resolving hdfs://58-cluster/... -->
+    <property>
+        <name>dfs.nameservices</name>
+        <value>58-cluster</value>
+    </property>
+
+    <property>
+        <name>dfs.ha.namenodes.58-cluster</name>
+        <value>nn1,nn2,nn3,nn4,nn5,nn6,nn7,nn8,nn9,nn10</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn1</name>
+        <value>hdp-58-cluster-nn1.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn2</name>
+        <value>hdp-58-cluster-nn2.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn3</name>
+        <value>hdpfd2-58-cluster-nn1.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn4</name>
+        <value>hdpfd2-58-cluster-nn2.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn5</name>
+        <value>hdpfd3-58-cluster-nn1.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn6</name>
+        <value>hdpfd3-58-cluster-nn2.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn7</name>
+        <value>hdpfd4-58-cluster-nn1.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn8</name>
+        <value>hdpfd4-58-cluster-nn2.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn9</name>
+        <value>hdpfd5-58-cluster-nn1.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.namenode.rpc-address.58-cluster.nn10</name>
+        <value>hdpfd5-58-cluster-nn2.58dns.org:9005</value>
+    </property>
+
+    <property>
+        <name>dfs.client.failover.proxy.provider.58-cluster</name>
+        <value>org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider</value>
+    </property>
+
+    <property>
+        <name>dfs.client.failover.random.order.58-cluster</name>
+        <value>true</value>
+    </property>
+
+    <!-- zk config -->
+    <property>
+        <name>ha.zookeeper.quorum</name>
+        <value>10.126.81.131:2181,10.126.81.132:2181,10.126.81.133:2181,10.126.81.221:2181,10.126.81.222:2181</value>
+    </property>
+
+    <property>
+        <name>ha.zookeeper.session-timeout.ms</name>
+        <value>60000</value>
+    </property>
+
+    <!-- authorization config -->
+    <property>
+        <name>hadoop.proxyuser.hadoop-user.hosts</name>
+        <value>*</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.hadoop-user.groups</name>
+        <value>*</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.httpfs.hosts</name>
+        <value>*</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.httpfs.groups</name>
+        <value>*</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.work.groups</name>
+        <value>*</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.work.users</name>
+        <value>*</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.work.hosts</name>
+        <value>10.126.81.130,10.126.81.220</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.hadoop.groups</name>
+        <value>*</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.hadoop.users</name>
+        <value>*</value>
+    </property>
+
+    <property>
+        <name>hadoop.proxyuser.hadoop.hosts</name>
+        <value>10.126.81.130,10.126.81.220,10.126.100.4,10.126.100.68</value>
+    </property>
+
+    <property>
+        <name>hadoop.security.authorization</name>
+        <value>true</value>
+    </property>
+
+    <!-- param config -->
+    <property>
+        <name>fs.trash.interval</name>
+        <value>1440</value>
+    </property>
+
+    <property>
+        <name>io.compression.codecs</name>
+        <value>org.apache.hadoop.io.compress.DefaultCodec,org.apache.hadoop.io.compress.GzipCodec,org.apache.hadoop.io.compress.BZip2Codec,com.hadoop.compression.lzo.LzoCodec,com.hadoop.compression.lzo.LzopCodec,org.apache.hadoop.io.compress.SnappyCodec</value>
+    </property>
+
+    <property>
+        <name>io.compression.codec.lzo.class</name>
+        <value>com.hadoop.compression.lzo.LzoCodec</value>
+    </property>
+
+    <property>
+        <name>fs.viewfs.rename.strategy</name>
+        <value>SAME_FILESYSTEM_ACROSS_MOUNTPOINT</value>
+    </property>
+
+    <!-- performance -->
+    <property>
+        <name>ipc.server.read.threadpool.size</name>
+        <value>3</value>
+    </property>
+
+    <property>
+        <name>ipc.server.listen.queue.size</name>
+        <value>1024</value>
+    </property>
+
+    <property>
+        <name>hadoop.user.group.static.mapping.overrides</name>
+        <value>hdp_lbg_ecdata_basestat=hdp_lbg_ecdata_basestat;hdp_lbg_ectech=hdp_lbg_ectech;</value>
+    </property>
+
+    <!--rbf-->
+    <property>
+        <name>fs.viewfs.impl</name>
+        <value>org.apache.hadoop.hdfs.ViewFsRedirectDistributedFileSystem</value>
+    </property>
+
+    <property>
+        <name>fs.AbstractFileSystem.viewfs.impl</name>
+        <value>org.apache.hadoop.hdfs.ViewFsRedirectHdfs</value>
+    </property>
+
+    <!--caller context-->
+    <property>
+        <name>hadoop.caller.context.enabled</name>
+        <value>true</value>
+    </property>
+
+</configuration>

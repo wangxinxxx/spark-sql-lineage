@@ -25,7 +25,7 @@ jobs:
       SPARK_LOCAL_IP: localhost
       MAVEN_OPTS: -Xmx1g
     steps:
-      - name: Checkout spark-sql-flow-plugin repository
+      - name: Checkout spark-sql-lineage repository
         uses: actions/checkout@v2
         # In order to fetch changed files
         with:

@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+
+<configuration>
+    <!--
+      Local lineage analysis only needs the generic 58-cluster mount points.
+      The original environment-specific mappings to nameservice1/hdpfd*/mis-58-cluster
+      are intentionally omitted here because those authorities are not resolvable
+      in the local runtime and cause UnknownHostException during analyzer initialization.
+    -->
+
+    <property>
+        <name>fs.viewfs.mounttable.58-cluster.link./home</name>
+        <value>hdfs://58-cluster/home</value>
+    </property>
+
+    <property>
+        <name>fs.viewfs.mounttable.58-cluster.link./user</name>
+        <value>hdfs://58-cluster/user</value>
+    </property>
+
+    <property>
+        <name>fs.viewfs.mounttable.58-cluster.link./tmp</name>
+        <value>hdfs://58-cluster/tmp</value>
+    </property>
+</configuration>

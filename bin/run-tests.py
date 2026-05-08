@@ -148,7 +148,7 @@ def parse_opts():
     parser = ArgumentParser(prog="run-tests")
     parser.add_argument(
         "--package", type=str, required=True,
-        help="A compiled jar assembly of `spark-sql-flow-plugin`"
+        help="A compiled jar assembly of `spark-sql-lineage`"
     )
     parser.add_argument(
         "--module", type=str, required=True,

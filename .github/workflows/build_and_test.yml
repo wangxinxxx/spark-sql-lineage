@@ -18,7 +18,7 @@ jobs:
       CONDA_DISABLED: 1
       MAVEN_OPTS: -Xmx1g
     steps:
-      - name: Checkout spark-sql-flow-plugin repository
+      - name: Checkout spark-sql-lineage repository
         uses: actions/checkout@v2
         # In order to fetch changed files
         with:
@@ -47,7 +47,7 @@ jobs:
           path: "./target/unit-tests.log"
 
   neo4j-tests-java8-python37:
-    uses: maropu/spark-sql-flow-plugin/.github/workflows/neo4j_tests.yml@spark-3.2
+    uses: ./.github/workflows/neo4j_tests.yml
     with:
       java: 1.8
       python: 3.7
@@ -60,7 +60,7 @@ jobs:
     # Since the neo4j integration tests will access the same Neo4j Aura instance,
     # they cannot run concurrently.
     needs: neo4j-tests-java8-python37
-    uses: maropu/spark-sql-flow-plugin/.github/workflows/neo4j_tests.yml@spark-3.2
+    uses: ./.github/workflows/neo4j_tests.yml
     with:
       java: 1.8
       python: 3.8
@@ -71,7 +71,7 @@ jobs:
 
   neo4j-tests-java11-python37:
     needs: neo4j-tests-java8-python38
-    uses: maropu/spark-sql-flow-plugin/.github/workflows/neo4j_tests.yml@spark-3.2
+    uses: ./.github/workflows/neo4j_tests.yml
     with:
       java: 11
       python: 3.7
@@ -82,7 +82,7 @@ jobs:
 
   neo4j-tests-java11-python38:
     needs: neo4j-tests-java11-python37
-    uses: maropu/spark-sql-flow-plugin/.github/workflows/neo4j_tests.yml@spark-3.2
+    uses: ./.github/workflows/neo4j_tests.yml
     with:
       java: 11
       python: 3.8

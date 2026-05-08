@@ -51,12 +51,17 @@ object SQLVariableSubstitutor {
   private val AtVariableReferencePattern = """@([A-Za-z_][A-Za-z0-9_]*)""".r
   private val HiveVariablePrefixPattern = """(?i)^(hivevar|hiveconf):(.+)$""".r
   private val BashOffsetUnits = "year|month|week|day|hour|minute|min|second|sec"
+  private val BashOffsetAmounts = """[+-]?\s*\d+|a|an"""
   private val BashOffsetPattern =
-    ("""(?i)^\s*([+-]?\s*\d+)\s*(?:[+-]\s*)?(""" + BashOffsetUnits + """)s?\s*$""").r
+    ("""(?i)^\s*(""" + BashOffsetAmounts + """)\s*(?:[+-]\s*)?(""" +
+      BashOffsetUnits + """)s?\s*$""").r
   private val BashOffsetFindPattern =
-    ("""(?i)([+-]?\s*\d+)\s*(?:[+-]\s*)?(""" + BashOffsetUnits + """)s?\b""").r
+    ("""(?i)(""" + BashOffsetAmounts + """)\s*(?:[+-]\s*)?(""" +
+      BashOffsetUnits + """)s?\b""").r
   private val DateTimeFindPattern =
     """(\d{4}-\d{2}-\d{2}|\d{8})(?:[ T](\d{2}:\d{2}:\d{2}))?""".r
+  private val BashTrailingAgoPattern = """(?is)^(.*?)(?:\s+ago)\s*$""".r
+  private val IgnorableBashTimeUnitPattern = """(?i)^(hour|minute|min|second|sec)s?$""".r
   private val BashRoundedEpochPattern =
     """(?is)^\s*date\s+-d\s+["']?@\$\(\(\s*\$\(date\s+\+%s\)\s*/\s*(\d+)\s*\*\s*(\d+)(?:\s*([+-])\s*(\d+))?\s*\)\)["']?\s+\+(.+?)\s*$""".r
   private val BashMidnightEpochOffsetPattern =
@@ -200,6 +205,7 @@ object SQLVariableSubstitutor {
     Map(
       "tempCatalog" -> context.tempCatalog,
       "outFileSuffix" -> formatDate(businessDate),
+      "yesterday" -> quoted(formatDate(businessDate)),
       "startDate" -> quoted(formatDate(businessDate)),
       "dateSuffix" -> businessDate.format(DateSuffixFormatter),
       "dateHourSuffix" -> now.format(HourSuffixFormatter),
@@ -391,11 +397,20 @@ object SQLVariableSubstitutor {
     val formatText = tokens.find(_.startsWith("+")).getOrElse {
       throw new IllegalArgumentException(s"Unsupported bash date format: $commandText")
     }
-    val dateText = tokens.sliding(2).find(_.head == "-d").map(_(1))
+    val dateText = extractBashDateArgument(tokens)
     val dateTime = dateText
       .map(evaluateBashDateText(_, context))
       .getOrElse(context.effectiveDateTime)
     dateTime.format(DateTimeFormatter.ofPattern(toJavaDatePattern(formatText), Locale.ROOT))
+  }
+
+  private def extractBashDateArgument(tokens: Seq[String]): Option[String] = {
+    tokens.zipWithIndex.collectFirst {
+      case ("-d", index) if index + 1 < tokens.length =>
+        tokens(index + 1)
+      case (token, _) if token.startsWith("-d") && token.length > 2 =>
+        token.substring(2)
+    }
   }
 
   private def evaluateBashDateText(
@@ -412,15 +427,28 @@ object SQLVariableSubstitutor {
     val withoutDate = dateMatch.map { matched =>
       dateText.substring(0, matched.start) + dateText.substring(matched.end)
     }.getOrElse(dateText)
-    val offsets = BashOffsetFindPattern.findAllMatchIn(withoutDate).toSeq
-    val residue = BashOffsetFindPattern.replaceAllIn(withoutDate, "").trim
+    val normalizedOffsets = withoutDate.trim
+    val (offsetSource, hasTrailingAgo) = normalizedOffsets match {
+      case BashTrailingAgoPattern(prefix) => (prefix.trim, true)
+      case _ => (normalizedOffsets, false)
+    }
+    val offsets = BashOffsetFindPattern.findAllMatchIn(offsetSource).toSeq
+    val residue = BashOffsetFindPattern.replaceAllIn(offsetSource, "").trim
+    val ignorableResidue = dateMatch.nonEmpty && (residue match {
+        case IgnorableBashTimeUnitPattern(_) => true
+        case _ => false
+      })
 
-    if (residue.nonEmpty && residue != "now" && residue != "today") {
+    if ((hasTrailingAgo && offsets.isEmpty) ||
+        (residue.nonEmpty && residue != "now" && residue != "today" && !ignorableResidue)) {
       throw new IllegalArgumentException(s"Unsupported bash date offset: $dateText")
     }
 
     offsets.foldLeft(baseDateTime) { case (dateTime, matched) =>
-      applyBashOffset(dateTime, s"${matched.group(1)} ${matched.group(2)}")
+      applyBashOffset(
+        dateTime,
+        s"${matched.group(1)} ${matched.group(2)}",
+        negate = hasTrailingAgo)
     }
   }
 
@@ -465,10 +493,14 @@ object SQLVariableSubstitutor {
     tokens.toSeq
   }
 
-  private def applyBashOffset(dateTime: LocalDateTime, offsetText: String): LocalDateTime = {
+  private def applyBashOffset(
+      dateTime: LocalDateTime,
+      offsetText: String,
+      negate: Boolean = false): LocalDateTime = {
     offsetText match {
       case BashOffsetPattern(amountText, unit) =>
-        val amount = amountText.replaceAll("\\s+", "").toLong
+        val rawAmount = parseBashOffsetAmount(amountText)
+        val amount = if (negate) -rawAmount else rawAmount
         unit.toLowerCase(Locale.ROOT) match {
           case "year" => dateTime.plusYears(amount)
           case "month" => dateTime.plusMonths(amount)
@@ -482,6 +514,13 @@ object SQLVariableSubstitutor {
         dateTime
       case _ =>
         throw new IllegalArgumentException(s"Unsupported bash date offset: $offsetText")
+    }
+  }
+
+  private def parseBashOffsetAmount(amountText: String): Long = {
+    amountText.trim.toLowerCase(Locale.ROOT) match {
+      case "a" | "an" => 1L
+      case _ => amountText.replaceAll("\\s+", "").toLong
     }
   }
 

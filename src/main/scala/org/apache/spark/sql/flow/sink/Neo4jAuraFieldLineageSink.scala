@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.flow.sink
 
+import java.io.File
 import java.util.Locale
 
 import scala.collection.JavaConverters._
@@ -30,9 +31,12 @@ import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.flow._
 
 case class Neo4jFieldLineageWriteStats(nodeCount: Int, edgeCount: Int)
+case class FieldLineageImportStats(recordCount: Int, rawNodeCount: Int, rawEdgeCount: Int)
 
 case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
-  extends BaseGraphBatchSink with BaseGraphStreamSink with Neo4jAura with Logging {
+  extends BaseGraphBatchSink with FieldLineageSink with Neo4jAura with Logging {
+
+  @volatile private var constraintsInitialized = false
 
   private object GraphMode extends Enumeration {
     val Full, DirectTableField = Value
@@ -256,9 +260,10 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
     case NonFatal(_) =>
   }
 
-  private def tryToCreateNodes(s: Session, nodes: Seq[SQLFlowGraphNode]): Unit = {
-    withTx(s) { tx =>
-      createNodes(tx, nodes)
+  private def ensureConstraints(s: Session): Unit = this.synchronized {
+    if (!constraintsInitialized) {
+      tryToCreateConstraints(s)
+      constraintsInitialized = true
     }
   }
 
@@ -499,6 +504,67 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
     createDirectTableFieldEdges(tx, nodeMap, edges, options)
   }
 
+  private def appendRecord(
+      tx: Transaction,
+      nodes: Seq[SQLFlowGraphNode],
+      edges: Seq[SQLFlowGraphEdge],
+      options: Map[String, String]): Unit = {
+    graphMode(options) match {
+      case GraphMode.DirectTableField =>
+        createDirectTableFieldOnlyGraph(tx, nodes, edges, options)
+      case GraphMode.Full =>
+        createNodes(tx, nodes)
+        createEdges(tx, nodes, edges, options)
+    }
+  }
+
+  private def appendBatch(s: Session, records: Seq[FieldLineageRecord]): Unit = {
+    if (records.nonEmpty) {
+      withTx(s) { tx =>
+        records.foreach { record =>
+          appendRecord(tx, record.nodes, record.edges, record.options)
+        }
+      }
+    }
+  }
+
+  def withReusableDriver[T](f: Driver => T): T = withDriver(f)
+
+  def appendRecordFile(
+      file: File,
+      batchSize: Int,
+      driver: Driver): FieldLineageImportStats = {
+    val normalizedBatchSize = math.max(batchSize, 1)
+    withSession(driver) { s =>
+      ensureConstraints(s)
+      FieldLineageJsonFileFormat.withRecordIterator(file) { records =>
+        val batch = mutable.ArrayBuffer[FieldLineageRecord]()
+        var recordCount = 0
+        var rawNodeCount = 0
+        var rawEdgeCount = 0
+
+        def flushBatch(): Unit = {
+          if (batch.nonEmpty) {
+            appendBatch(s, batch.toVector)
+            batch.clear()
+          }
+        }
+
+        records.foreach { record =>
+          batch += record
+          recordCount += 1
+          rawNodeCount += record.nodes.size
+          rawEdgeCount += record.edges.size
+          if (batch.size >= normalizedBatchSize) {
+            flushBatch()
+          }
+        }
+        flushBatch()
+        FieldLineageImportStats(recordCount, rawNodeCount, rawEdgeCount)
+      }
+    }
+  }
+
   private def isDatabaseEmpty(tx: Transaction): Boolean = {
     !tx.run("MATCH (n) RETURN 1 LIMIT 1").hasNext
   }
@@ -535,18 +601,8 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
       edges: Seq[SQLFlowGraphEdge],
       options: Map[String, String]): Unit = {
     withSession { s =>
-      tryToCreateConstraints(s)
-      if (graphMode(options) == GraphMode.Full) {
-        tryToCreateNodes(s, nodes)
-      }
-      withTx(s) { tx =>
-        graphMode(options) match {
-          case GraphMode.DirectTableField =>
-            createDirectTableFieldOnlyGraph(tx, nodes, edges, options)
-          case GraphMode.Full =>
-            createEdges(tx, nodes, edges, options)
-        }
-      }
+      ensureConstraints(s)
+      appendBatch(s, Seq(FieldLineageRecord(nodes, edges, options)))
     }
   }
 }

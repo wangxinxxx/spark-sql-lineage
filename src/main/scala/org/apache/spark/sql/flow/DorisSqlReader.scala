@@ -29,9 +29,10 @@ case class DorisSqlReaderConfig(
     jdbcUrl: String = "jdbc:mysql://10.40.87.153:9030/",
     table: String = "temp.dim_dg_58dp_job_info_full_1d",
     user: String = "test_user",
-    password: String = "wx123..$$",
+    password: String = "555a3EE8rI0",
     fetchSize: Int = 1000,
     whereClause: Option[String] = None,
+    orderBy: Option[String] = None,
     limit: Option[Int] = None)
 
 case class DorisSqlRow(rowNumber: Int, jobName: String, sql: String, details: String)
@@ -95,8 +96,15 @@ object DorisSqlReader {
         s" WHERE $clause"
       }
     }.getOrElse("")
+    val orderByText = config.orderBy.map(_.trim).filter(_.nonEmpty).map { clause =>
+      if (clause.toLowerCase(Locale.ROOT).startsWith("order by ")) {
+        s" $clause"
+      } else {
+        s" ORDER BY $clause"
+      }
+    }.getOrElse("")
     val limitText = config.limit.filter(_ > 0).map(limit => s" LIMIT $limit").getOrElse("")
-    s"SELECT job_name, details FROM ${config.table}$whereText$limitText"
+    s"SELECT job_name, details FROM ${config.table}$whereText$orderByText$limitText"
   }
 
   private def row(resultSet: ResultSet, rowNumber: Int): Option[DorisSqlRow] = {

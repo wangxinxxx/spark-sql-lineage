@@ -26,13 +26,13 @@
   </parent>
 
   <groupId>org.apache.spark</groupId>
-  <artifactId>spark-sql-flow-plugin_2.12</artifactId>
+  <artifactId>spark-sql-lineage_2.12</artifactId>
   <version>1.0.0-SNAPSHOT</version>
   <packaging>jar</packaging>
   <name>Visualize Data Lineage in Spark SQL</name>
 
   <properties>
-    <project.package.name>spark-sql-flow-plugin</project.package.name>
+    <project.package.name>spark-sql-lineage</project.package.name>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <java.version>1.8</java.version>
@@ -49,6 +49,7 @@
     <mysql.connector.version>8.0.32</mysql.connector.version>
     <scalatest.version>3.2.3</scalatest.version>
     <hive.version>2.3.7</hive.version>
+    <hive.jdbc.version>1.1.0-cdh5.4.4</hive.jdbc.version>
 
     <test.java.home>${java.home}</test.java.home>
     <!--    <spark.test.home>${session.executionRootDirectory}</spark.test.home>-->
@@ -112,6 +113,26 @@
       <groupId>org.apache.hive</groupId>
       <artifactId>hive-metastore</artifactId>
       <version>${hive.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.hive</groupId>
+      <artifactId>hive-jdbc</artifactId>
+      <version>${hive.jdbc.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>org.apache.curator</groupId>
+          <artifactId>curator-framework</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.slf4j</groupId>
+          <artifactId>slf4j-log4j12</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.logging.log4j</groupId>
+          <artifactId>log4j-slf4j-impl</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <dependency>

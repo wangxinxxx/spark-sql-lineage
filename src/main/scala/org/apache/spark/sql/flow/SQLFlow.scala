@@ -36,6 +36,7 @@ import org.apache.spark.sql.catalyst.plans.{ExistenceJoin, JoinType, LeftExisten
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.columnar.InMemoryRelation
 import org.apache.spark.sql.execution.datasources.LogicalRelation
+import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2ScanRelation}
 import org.apache.spark.sql.flow.sink.{BaseGraphFormat, GraphVizSink}
 import org.apache.spark.sql.internal.SQLConf
 
@@ -359,6 +360,10 @@ abstract class BaseSQLFlow extends PredicateHelper with Logging {
       (table.qualifiedName, table.qualifiedName)
     case HiveTableRelation(table, _, _, _, _) =>
       (table.qualifiedName, table.qualifiedName)
+    case r: DataSourceV2Relation =>
+      (r.name, r.name)
+    case r: DataSourceV2ScanRelation =>
+      (r.name, r.name)
     case j: Join =>
       val nodeName = s"${p.nodeName}_${joinTypeName(j.joinType)}"
       (nodeName, getNodeNameWithId(nodeName))
@@ -441,7 +446,8 @@ abstract class BaseSQLFlow extends PredicateHelper with Logging {
   }
 
   private def getStatsFromLeafPlan(p: LogicalPlan): Seq[(String, String)] = p match {
-    case _: LogicalRelation | _: HiveTableRelation =>
+    case _: LogicalRelation | _: HiveTableRelation | _: DataSourceV2Relation |
+        _: DataSourceV2ScanRelation =>
       val stats = mutable.ArrayBuffer[(String, String)]()
       val planStats = p.asInstanceOf[LeafNode].computeStats()
       stats += "sizeInBytes" -> s"${planStats.sizeInBytes}"
@@ -514,7 +520,8 @@ abstract class BaseSQLFlow extends PredicateHelper with Logging {
     val outputAttrNames = p.output.map(_.name)
     val schemaDDL = p.schema.toDDL
     val graphNode = p match {
-      case _: LocalRelation | _: LogicalRelation | _: InMemoryRelation | _: HiveTableRelation =>
+      case _: LocalRelation | _: LogicalRelation | _: InMemoryRelation | _: HiveTableRelation |
+          _: DataSourceV2Relation | _: DataSourceV2ScanRelation =>
         generateTableNode(outputAttrNames, uniqId, nodeName, schemaDDL, isCached)
       case _: View | _: ViewNode | _: TempViewNode =>
         generateViewNode(outputAttrNames, uniqId, nodeName, schemaDDL, isCached)
