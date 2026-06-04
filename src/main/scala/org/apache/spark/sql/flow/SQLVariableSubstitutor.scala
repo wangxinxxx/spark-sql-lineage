@@ -78,7 +78,7 @@ object SQLVariableSubstitutor {
     val setVariables = extractSetVariables(sqlText)
     val withVariables = replaceVariables(sqlText, context, setVariables, Set.empty)
     val withAtVariables = replaceAtVariables(withVariables, context, setVariables)
-    BashPattern.replaceAllIn(withAtVariables, matched =>
+    replaceOutsideComments(withAtVariables, BashPattern, matched =>
       Regex.quoteReplacement(evaluateBashDate(matched.group(1), context)))
   }
 
@@ -87,7 +87,7 @@ object SQLVariableSubstitutor {
       context: SQLVariableContext,
       setVariables: Map[String, String],
       resolvingSetVariables: Set[String]): String = {
-    VariablePattern.replaceAllIn(sqlText, matched => {
+    replaceOutsideComments(sqlText, VariablePattern, matched => {
       Regex.quoteReplacement(
         replaceVariable(matched.group(1), context, setVariables, resolvingSetVariables)
           .getOrElse(matched.matched))
@@ -124,7 +124,7 @@ object SQLVariableSubstitutor {
   }
 
   private def extractSetVariables(sqlText: String): Map[String, String] = {
-    SetVariablePattern.findAllMatchIn(sqlText).flatMap { matched =>
+    SetVariablePattern.findAllMatchIn(maskComments(sqlText)).flatMap { matched =>
       val variableName = matched.group(1).trim.stripPrefix("@")
       val value = matched.group(2).trim
       if (variableName.nonEmpty) {
@@ -145,7 +145,7 @@ object SQLVariableSubstitutor {
       sqlText: String,
       context: SQLVariableContext,
       setVariables: Map[String, String]): String = {
-    AtVariableReferencePattern.replaceAllIn(sqlText, matched => {
+    replaceOutsideComments(sqlText, AtVariableReferencePattern, matched => {
       val start = matched.start
       if (isSetVariableDeclarationAt(sqlText, start)) {
         matched.matched
@@ -157,6 +157,40 @@ object SQLVariableSubstitutor {
         }.getOrElse(matched.matched))
       }
     })
+  }
+
+  private def replaceOutsideComments(
+      sqlText: String,
+      pattern: Regex,
+      replacement: Regex.Match => String): String = {
+    val uncommentedSql = maskComments(sqlText)
+    val result = new StringBuilder(sqlText.length)
+    var cursor = 0
+    var replaced = false
+
+    pattern.findAllMatchIn(sqlText).foreach { matched =>
+      if (isOutsideComments(uncommentedSql, sqlText, matched.start, matched.end)) {
+        result.append(sqlText.substring(cursor, matched.start))
+        result.append(replacement(matched))
+        cursor = matched.end
+        replaced = true
+      }
+    }
+
+    if (!replaced) {
+      sqlText
+    } else {
+      result.append(sqlText.substring(cursor))
+      result.toString()
+    }
+  }
+
+  private def isOutsideComments(
+      uncommentedSql: String,
+      originalSql: String,
+      start: Int,
+      end: Int): Boolean = {
+    uncommentedSql.regionMatches(start, originalSql, start, end - start)
   }
 
   private def isSetVariableDeclarationAt(sqlText: String, atIndex: Int): Boolean = {
@@ -338,6 +372,70 @@ object SQLVariableSubstitutor {
     evaluateRoundedEpochBashDate(commandText, context).getOrElse {
       evaluateSimpleBashDate(commandText, context)
     }
+  }
+
+  private def maskComments(sqlText: String): String = {
+    val result = new StringBuilder(sqlText.length)
+    var inSingleQuote = false
+    var inDoubleQuote = false
+    var inBacktick = false
+    var inLineComment = false
+    var inBlockComment = false
+    var index = 0
+
+    while (index < sqlText.length) {
+      val ch = sqlText.charAt(index)
+      val next = if (index + 1 < sqlText.length) sqlText.charAt(index + 1) else 0.toChar
+
+      if (inLineComment) {
+        if (ch == '\n' || ch == '\r') {
+          inLineComment = false
+          result.append(ch)
+        } else {
+          result.append(' ')
+        }
+      } else if (inBlockComment) {
+        if (ch == '*' && next == '/') {
+          result.append("  ")
+          inBlockComment = false
+          index += 1
+        } else if (ch == '\n' || ch == '\r') {
+          result.append(ch)
+        } else {
+          result.append(' ')
+        }
+      } else if (ch == '\'' && !inDoubleQuote && !inBacktick) {
+        result.append(ch)
+        if (inSingleQuote && next == '\'') {
+          result.append(next)
+          index += 1
+        } else {
+          inSingleQuote = !inSingleQuote
+        }
+      } else if (ch == '"' && !inSingleQuote && !inBacktick) {
+        inDoubleQuote = !inDoubleQuote
+        result.append(ch)
+      } else if (ch == '`' && !inSingleQuote && !inDoubleQuote) {
+        inBacktick = !inBacktick
+        result.append(ch)
+      } else if (!inSingleQuote && !inDoubleQuote && !inBacktick &&
+          ch == '-' && next == '-') {
+        inLineComment = true
+        result.append("  ")
+        index += 1
+      } else if (!inSingleQuote && !inDoubleQuote && !inBacktick &&
+          ch == '/' && next == '*') {
+        inBlockComment = true
+        result.append("  ")
+        index += 1
+      } else {
+        result.append(ch)
+      }
+
+      index += 1
+    }
+
+    result.toString()
   }
 
   private def evaluateRoundedEpochBashDate(

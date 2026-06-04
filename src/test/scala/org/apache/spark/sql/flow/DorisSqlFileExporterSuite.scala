@@ -122,4 +122,25 @@ class DorisSqlFileExporterSuite extends AnyFunSuite {
     assert(Files.exists(rawDir.resolve("jar_job.sql")))
     assert(Files.exists(rawDir.resolve("temp_job.sql")))
   }
+
+  test("export rows preserves comment-only variable examples") {
+    val baseDir = Files.createTempDirectory("doris-sql-exporter-comments-suite-")
+    val outputDir = baseDir.resolve("sqls")
+    val rawDir = baseDir.resolve("raw")
+    val sql =
+      """-- example: ${#date(0,0,-N):yyyy-MM-dd#}
+        |insert overwrite table demo partition(dt='${#date(0,0,-1):yyyy-MM-dd#}')
+        |select 1;""".stripMargin
+
+    val exported = DorisSqlFileExporter.exportRows(
+      Seq(DorisSqlRow(7532, "comment example", sql, "")),
+      outputDir,
+      rawDir)
+
+    val exportedSql = new String(Files.readAllBytes(exported.head), StandardCharsets.UTF_8)
+
+    assert(exported.size == 1)
+    assert(exportedSql.contains("-- example: ${#date(0,0,-N):yyyy-MM-dd#}"))
+    assert(exportedSql.contains("partition(dt='2026-05-19')"))
+  }
 }

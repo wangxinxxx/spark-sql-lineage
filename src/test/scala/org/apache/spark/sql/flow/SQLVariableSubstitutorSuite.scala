@@ -273,6 +273,19 @@ class SQLVariableSubstitutorSuite extends AnyFunSuite {
     assert(SQLVariableSubstitutor.replace("${start_date}", baseContext) == "${start_date}")
   }
 
+  test("preserve variable examples inside sql comments") {
+    val sql =
+      """-- example: ${#date(0,0,-N):yyyy-MM-dd#}
+        |/* set hivevar:commented_value=${today}; */
+        |select '${#date(0,0,-1):yyyy-MM-dd#}' as dt;""".stripMargin
+
+    val actual = SQLVariableSubstitutor.replace(sql, baseContext)
+
+    assert(actual.contains("-- example: ${#date(0,0,-N):yyyy-MM-dd#}"))
+    assert(actual.contains("/* set hivevar:commented_value=${today}; */"))
+    assert(actual.contains("select '2015-08-23' as dt;"))
+  }
+
   test("unsupported bash commands fail closed") {
     val error = intercept[IllegalArgumentException] {
       SQLVariableSubstitutor.replace("$bash{echo hello}", baseContext)

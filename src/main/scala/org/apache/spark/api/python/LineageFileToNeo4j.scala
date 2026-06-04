@@ -27,9 +27,9 @@ object LineageFileToNeo4j {
   private val DefaultNeo4jUser = "neo4j"
   private val DefaultNeo4jPassword = "wx123456.."
   private val DefaultBatchSize = 500
-  private val DefaultInputPath = new File("output/sqlflow-debug/parallel-run-0508-2")
+  private val DefaultInputPath = new File("output/sqlflow-debug/parallel-run-0604-2")
   // Edit one of these two variables to resume a large import without changing CLI args.
-  private val StartFromPathContains = ""
+  private val StartFromPathContains = "04784"
   private val StartAfterPathContains = ""
 
   def main(args: Array[String]): Unit = {
