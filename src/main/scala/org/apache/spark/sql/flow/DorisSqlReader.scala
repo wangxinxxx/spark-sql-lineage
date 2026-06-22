@@ -35,7 +35,12 @@ case class DorisSqlReaderConfig(
     orderBy: Option[String] = None,
     limit: Option[Int] = None)
 
-case class DorisSqlRow(rowNumber: Int, jobName: String, sql: String, details: String)
+case class DorisSqlRow(
+    rowNumber: Int,
+    scheduleId: String,
+    jobName: String,
+    sql: String,
+    details: String)
 
 class DorisSqlReader(config: DorisSqlReaderConfig = DorisSqlReaderConfig()) {
   def readRows(): Seq[DorisSqlRow] = {
@@ -60,7 +65,7 @@ class DorisSqlReader(config: DorisSqlReaderConfig = DorisSqlReaderConfig()) {
 
   def readSqlRows(): Seq[XlsxSqlRow] = {
     readRows().map { row =>
-      XlsxSqlRow(row.rowNumber, row.jobName, "", row.sql)
+      XlsxSqlRow(row.rowNumber, row.scheduleId, "", row.sql)
     }
   }
 }
@@ -104,13 +109,14 @@ object DorisSqlReader {
       }
     }.getOrElse("")
     val limitText = config.limit.filter(_ > 0).map(limit => s" LIMIT $limit").getOrElse("")
-    s"SELECT job_name, details FROM ${config.table}$whereText$orderByText$limitText"
+    s"SELECT schedule_id, job_name, details FROM ${config.table}$whereText$orderByText$limitText"
   }
 
   private def row(resultSet: ResultSet, rowNumber: Int): Option[DorisSqlRow] = {
+    val scheduleId = Option(resultSet.getString("schedule_id")).getOrElse("").trim
     val jobName = Option(resultSet.getString("job_name")).getOrElse("").trim
     val details = resultSet.getString("details")
-    extractSql(details).map(sql => DorisSqlRow(rowNumber, jobName, sql, details))
+    extractSql(details).map(sql => DorisSqlRow(rowNumber, scheduleId, jobName, sql, details))
   }
 
   private def withConnection[T](config: DorisSqlReaderConfig)(f: Connection => T): T = {

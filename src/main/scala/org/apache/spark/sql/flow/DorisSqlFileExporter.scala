@@ -28,6 +28,7 @@ object DorisSqlFileExporter {
   private val DefaultOutputDir = Paths.get("input/sqls")
   private val DefaultRawOutputDir = Paths.get("input/raw")
   private val DefaultOrderBy = "schedule_id ASC"
+  private val ManifestHeader = "sql_file\tschedule_id\tjob_name"
   private val WithAddJarDirSuffix = "_with_add_jar"
   private val SparkSetLinePattern = """(?im)^([ \t]*)(set\s+spark\.[^\r\n]*)$""".r
   private val AddJarLinePattern = """(?im)^[ \t]*add\s+jar\b[^\r\n]*$""".r
@@ -76,7 +77,7 @@ object DorisSqlFileExporter {
     Files.createDirectories(outputDir)
     Files.createDirectories(withAddJarDir)
     Files.createDirectories(rawOutputDir)
-    rows.map { row =>
+    val exportedRows = rows.map { row =>
       val file = outputDir.resolve(fileName(row))
       val withAddJarFile = withAddJarDir.resolve(fileName(row))
       val rawFile = rawOutputDir.resolve(fileName(row))
@@ -92,7 +93,7 @@ object DorisSqlFileExporter {
           }
         Files.deleteIfExists(staleFile)
         writeSqlFile(targetFile.toFile, normalizedSql)
-        targetFile
+        targetFile -> row
       } catch {
         case NonFatal(error) =>
           throw new IllegalArgumentException(
@@ -103,6 +104,37 @@ object DorisSqlFileExporter {
             error)
       }
     }
+    writeManifest(manifestPath(outputDir), exportedRows)
+    exportedRows.map(_._1)
+  }
+
+  private[flow] def manifestPath(outputDir: Path): Path = {
+    val manifestFileName = Option(outputDir.getFileName)
+      .map(name => s"${name.toString}_manifest.tsv")
+      .getOrElse("sqls_manifest.tsv")
+    Option(outputDir.getParent)
+      .map(_.resolve(manifestFileName))
+      .getOrElse(Paths.get(manifestFileName))
+  }
+
+  private def writeManifest(manifestFile: Path, exportedRows: Seq[(Path, DorisSqlRow)]): Unit = {
+    Option(manifestFile.getParent).foreach(Files.createDirectories(_))
+    val writer = new PrintWriter(manifestFile.toFile, "UTF-8")
+    try {
+      writer.println(ManifestHeader)
+      exportedRows.foreach { case (path, row) =>
+        writer.println(Seq(
+          path.getFileName.toString,
+          row.scheduleId,
+          row.jobName).map(escapeManifestValue).mkString("\t"))
+      }
+    } finally {
+      writer.close()
+    }
+  }
+
+  private def escapeManifestValue(value: String): String = {
+    Option(value).getOrElse("").replace('\t', ' ').replace('\r', ' ').replace('\n', ' ')
   }
 
   private def fileName(row: DorisSqlRow): String = {

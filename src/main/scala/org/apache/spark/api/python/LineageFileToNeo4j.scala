@@ -18,6 +18,9 @@
 package org.apache.spark.api.python
 
 import java.io.File
+import java.util.Locale
+
+import scala.io.{Codec, Source}
 
 import org.apache.spark.sql.flow.sink.{FieldLineageJsonFileFormat, Neo4jAuraFieldLineageSink}
 
@@ -28,6 +31,7 @@ object LineageFileToNeo4j {
   private val DefaultNeo4jPassword = "wx123456.."
   private val DefaultBatchSize = 500
   private val DefaultInputPath = new File("output/sqlflow-debug/parallel-run-0604-2")
+  private val DefaultManifestPath = new File("input/sqls_manifest.tsv")
   // Edit one of these two variables to resume a large import without changing CLI args.
   private val StartFromPathContains = "04784"
   private val StartAfterPathContains = ""
@@ -49,6 +53,13 @@ object LineageFileToNeo4j {
         s"No lineage jsonl files found under: ${input.getAbsolutePath}")
     }
     val lineageFiles = selectLineageFiles(allLineageFiles)
+    val scheduleIdsBySqlFile = manifestFile(args).map { file =>
+      val values = readScheduleIdManifest(file)
+      // scalastyle:off println
+      println(s"=== Loaded SQL manifest: file=${file.getAbsolutePath}, entries=${values.size} ===")
+      // scalastyle:on println
+      values
+    }.getOrElse(Map.empty[String, String])
 
     val sink = Neo4jAuraFieldLineageSink(uri, user, password)
     var recordCount = 0
@@ -57,7 +68,7 @@ object LineageFileToNeo4j {
 
     sink.withReusableDriver { driver =>
       lineageFiles.foreach { file =>
-        val stats = sink.appendRecordFile(file, batchSize, driver)
+        val stats = sink.appendRecordFile(file, batchSize, driver, scheduleIdsBySqlFile)
         recordCount += stats.recordCount
         rawNodeCount += stats.rawNodeCount
         rawEdgeCount += stats.rawEdgeCount
@@ -72,6 +83,64 @@ object LineageFileToNeo4j {
       s"=== Lineage import done: files=${lineageFiles.size}, records=$recordCount, " +
         s"rawNodes=$rawNodeCount, rawEdges=$rawEdgeCount ===")
     // scalastyle:on println
+  }
+
+  private def manifestFile(args: Array[String]): Option[File] = {
+    args.lift(5).orElse(sys.env.get("SQLFLOW_MANIFEST_PATH")).map { path =>
+      val file = new File(path)
+      if (!file.isFile) {
+        throw new IllegalArgumentException(s"SQL manifest file does not exist: ${file.getAbsolutePath}")
+      }
+      file
+    }.orElse {
+      if (DefaultManifestPath.isFile) {
+        Some(DefaultManifestPath)
+      } else {
+        None
+      }
+    }
+  }
+
+  private def readScheduleIdManifest(file: File): Map[String, String] = {
+    val source = Source.fromFile(file)(Codec.UTF8)
+    try {
+      val lines = source.getLines().filter(_.trim.nonEmpty).toVector
+      if (lines.isEmpty) {
+        Map.empty
+      } else {
+        val header = splitTsv(lines.head).map(stripUtf8Bom)
+          .map(_.trim.toLowerCase(Locale.ROOT))
+        val sqlFileIndex = headerIndex(header, "sql_file")
+        val scheduleIdIndex = headerIndex(header, "schedule_id")
+        lines.tail.flatMap { line =>
+          val cells = splitTsv(line)
+          for {
+            sqlFile <- cells.lift(sqlFileIndex).map(_.trim).filter(_.nonEmpty)
+            scheduleId <- cells.lift(scheduleIdIndex).map(_.trim).filter(_.nonEmpty)
+          } yield {
+            sqlFile -> scheduleId
+          }
+        }.toMap
+      }
+    } finally {
+      source.close()
+    }
+  }
+
+  private def splitTsv(line: String): Seq[String] = {
+    line.split("\t", -1).toSeq
+  }
+
+  private def stripUtf8Bom(value: String): String = {
+    value.stripPrefix("\uFEFF")
+  }
+
+  private def headerIndex(header: Seq[String], name: String): Int = {
+    val index = header.indexOf(name)
+    if (index < 0) {
+      throw new IllegalArgumentException(s"Missing '$name' column in SQL manifest")
+    }
+    index
   }
 
   private def selectLineageFiles(lineageFiles: Seq[File]): Seq[File] = {

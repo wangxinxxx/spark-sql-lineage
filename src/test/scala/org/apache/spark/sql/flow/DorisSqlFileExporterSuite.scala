@@ -101,10 +101,11 @@ class DorisSqlFileExporterSuite extends AnyFunSuite {
       "stale".getBytes(StandardCharsets.UTF_8))
 
     val rows = Seq(
-      DorisSqlRow(1, "plain job", "select 1;", ""),
-      DorisSqlRow(2, "jar job", "add jar viewfs://cluster/demo.jar;\nselect 2;", ""),
+      DorisSqlRow(1, "101", "plain job", "select 1;", ""),
+      DorisSqlRow(2, "102", "jar job", "add jar viewfs://cluster/demo.jar;\nselect 2;", ""),
       DorisSqlRow(
         3,
+        "103",
         "temp job",
         "create temporary function demo_udf as 'pkg.DemoUdf';\nselect demo_udf(3);",
         ""))
@@ -121,6 +122,13 @@ class DorisSqlFileExporterSuite extends AnyFunSuite {
     assert(Files.exists(rawDir.resolve("plain_job.sql")))
     assert(Files.exists(rawDir.resolve("jar_job.sql")))
     assert(Files.exists(rawDir.resolve("temp_job.sql")))
+    val manifest = new String(
+      Files.readAllBytes(DorisSqlFileExporter.manifestPath(outputDir)),
+      StandardCharsets.UTF_8)
+    assert(manifest.contains("sql_file\tschedule_id\tjob_name"))
+    assert(manifest.contains("plain_job.sql\t101\tplain job"))
+    assert(manifest.contains("jar_job.sql\t102\tjar job"))
+    assert(manifest.contains("temp_job.sql\t103\ttemp job"))
   }
 
   test("export rows preserves comment-only variable examples") {
@@ -133,7 +141,7 @@ class DorisSqlFileExporterSuite extends AnyFunSuite {
         |select 1;""".stripMargin
 
     val exported = DorisSqlFileExporter.exportRows(
-      Seq(DorisSqlRow(7532, "comment example", sql, "")),
+      Seq(DorisSqlRow(7532, "7532", "comment example", sql, "")),
       outputDir,
       rawDir)
 

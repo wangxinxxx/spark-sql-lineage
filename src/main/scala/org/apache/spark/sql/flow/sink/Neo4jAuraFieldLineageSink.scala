@@ -147,6 +147,20 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
     }.toSet
   }
 
+  private def collectTargetTableNodeRefs(
+      nodeMap: Map[String, NodeRef],
+      edges: Seq[SQLFlowGraphEdge]): Seq[NodeRef] = {
+    edges.flatMap { edge =>
+      for {
+        fromNodeRef <- nodeMap.get(edge.fromId)
+        toNodeRef <- nodeMap.get(edge.toId)
+        if fromNodeRef.node.tpe == GraphNodeType.QueryNode && isTableLikeOwner(toNodeRef.label)
+      } yield {
+        toNodeRef
+      }
+    }.groupBy(_.node.uniqueId).values.map(_.head).toSeq
+  }
+
   private def directTableFieldPairs(
       nodeMap: Map[String, NodeRef],
       edges: Seq[SQLFlowGraphEdge]): Seq[(String, String)] = {
@@ -228,6 +242,22 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
     }
   }
 
+  private def scheduleId(options: Map[String, String]): String = {
+    options.get("scheduleId")
+      .orElse(options.get("schedule_id"))
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .orNull
+  }
+
+  private def setScheduleIdSql(entity: String, enabled: Boolean): String = {
+    if (enabled) {
+      s"SET $entity.schedule_id = $$scheduleId"
+    } else {
+      ""
+    }
+  }
+
   private def graphMode(options: Map[String, String]): GraphMode.Value = {
     options.get("graphMode").map(_.trim.toLowerCase(Locale.ROOT)) match {
       case Some("direct_table_field") => GraphMode.DirectTableField
@@ -298,16 +328,37 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
     }
   }
 
+  private def setTargetTableScheduleIds(
+      tx: Transaction,
+      nodeMap: Map[String, NodeRef],
+      edges: Seq[SQLFlowGraphEdge],
+      options: Map[String, String]): Unit = {
+    val scheduleIdValue = scheduleId(options)
+    if (scheduleIdValue != null) {
+      collectTargetTableNodeRefs(nodeMap, edges).foreach { nodeRef =>
+        tx.run(
+          s"""
+             |MATCH (node:${nodeRef.label})
+             |WHERE node.${nodeRef.matchPredicate}
+             |SET node.schedule_id = $$scheduleId
+           """.stripMargin,
+          Values.parameters("scheduleId", scheduleIdValue))
+      }
+    }
+  }
+
   private def createFieldNodes(
       tx: Transaction,
       nodeMap: Map[String, NodeRef],
       edges: Seq[SQLFlowGraphEdge],
       options: Map[String, String]): Unit = {
     val sqlFileName = options.get("sqlFileName").orNull
+    val scheduleIdValue = scheduleId(options)
     val targetFieldUids = collectTargetTableFieldUids(nodeMap, edges)
     nodeMap.values.foreach { nodeRef =>
       nodeRef.node.attributeNames.zipWithIndex.foreach { case (_, port) =>
         buildFieldRef(nodeRef, port).foreach { fieldRef =>
+          val isTargetField = targetFieldUids.contains(fieldRef.uid)
           val fieldProps: Map[String, Object] = {
             val basicProps: Map[String, Object] = Map(
               "name" -> fieldRef.name,
@@ -324,7 +375,8 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
               withTableName + ("outputExpression" -> expr)
             }.getOrElse(withTableName)
           }
-          val taskPropsSql = appendSqlFileNameSql(targetFieldUids.contains(fieldRef.uid))
+          val taskPropsSql = appendSqlFileNameSql(isTargetField)
+          val scheduleIdSql = setScheduleIdSql("field", scheduleIdValue != null && isTargetField)
           tx.run(
             s"""
                |MATCH (owner:${nodeRef.label})
@@ -332,12 +384,14 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
                |MERGE (field:Field {uid: $$fieldUid})
                |SET field += $$fieldProps
                |$taskPropsSql
+               |$scheduleIdSql
                |MERGE (owner)-[:HAS_FIELD]->(field)
              """.stripMargin,
             Values.parameters(
               "fieldUid", fieldRef.uid,
               "fieldProps", fieldProps.asJava,
-              "sqlFileName", sqlFileName))
+              "sqlFileName", sqlFileName,
+              "scheduleId", scheduleIdValue))
         }
       }
     }
@@ -349,10 +403,12 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
       edges: Seq[SQLFlowGraphEdge],
       options: Map[String, String]): Unit = {
     val sqlFileName = options.get("sqlFileName").orNull
+    val scheduleIdValue = scheduleId(options)
     val targetFieldUids = collectTargetTableFieldUids(nodeMap, edges)
     nodeMap.values.filter(nodeRef => isTableLikeOwner(nodeRef.label)).foreach { nodeRef =>
       nodeRef.node.attributeNames.zipWithIndex.foreach { case (_, port) =>
         buildFieldRef(nodeRef, port).foreach { fieldRef =>
+          val isTargetField = targetFieldUids.contains(fieldRef.uid)
           val fieldProps: Map[String, Object] = Map(
             "name" -> fieldRef.name,
             "port" -> Int.box(fieldRef.port),
@@ -363,12 +419,14 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
             s"""
                |MERGE (field:Field {uid: $$fieldUid})
                |SET field += $$fieldProps
-               |${appendSqlFileNameSql(targetFieldUids.contains(fieldRef.uid))}
+               |${appendSqlFileNameSql(isTargetField)}
+               |${setScheduleIdSql("field", scheduleIdValue != null && isTargetField)}
              """.stripMargin,
             Values.parameters(
               "fieldUid", fieldRef.uid,
               "fieldProps", fieldProps.asJava,
-              "sqlFileName", sqlFileName))
+              "sqlFileName", sqlFileName,
+              "scheduleId", scheduleIdValue))
         }
       }
     }
@@ -472,6 +530,7 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
       buf.distinct.toSeq
     }
 
+    setTargetTableScheduleIds(tx, nodeMap, edges, options)
     createFieldNodes(tx, nodeMap, edges, options)
     createFieldEdges(tx, nodeMap, edges)
     if (enableDirectTableFieldLineage(options)) {
@@ -518,6 +577,25 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
     }
   }
 
+  private def withManifestScheduleId(
+      record: FieldLineageRecord,
+      scheduleIdsBySqlFile: Map[String, String]): FieldLineageRecord = {
+    if (scheduleIdsBySqlFile.isEmpty || scheduleId(record.options) != null) {
+      record
+    } else {
+      sqlFileLookupKeys(record.options).flatMap(scheduleIdsBySqlFile.get).headOption.map { value =>
+        record.copy(options = record.options + ("scheduleId" -> value))
+      }.getOrElse(record)
+    }
+  }
+
+  private def sqlFileLookupKeys(options: Map[String, String]): Seq[String] = {
+    Seq(
+      options.get("sqlFileName"),
+      options.get("sqlFilePath").map(path => new File(path).getName)
+    ).flatten.map(_.trim).filter(_.nonEmpty).distinct
+  }
+
   private def appendBatch(s: Session, records: Seq[FieldLineageRecord]): Unit = {
     if (records.nonEmpty) {
       withTx(s) { tx =>
@@ -533,7 +611,8 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
   def appendRecordFile(
       file: File,
       batchSize: Int,
-      driver: Driver): FieldLineageImportStats = {
+      driver: Driver,
+      scheduleIdsBySqlFile: Map[String, String] = Map.empty): FieldLineageImportStats = {
     val normalizedBatchSize = math.max(batchSize, 1)
     withSession(driver) { s =>
       ensureConstraints(s)
@@ -551,7 +630,7 @@ case class Neo4jAuraFieldLineageSink(uri: String, user: String, passwd: String)
         }
 
         records.foreach { record =>
-          batch += record
+          batch += withManifestScheduleId(record, scheduleIdsBySqlFile)
           recordCount += 1
           rawNodeCount += record.nodes.size
           rawEdgeCount += record.edges.size

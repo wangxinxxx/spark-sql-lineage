@@ -33,7 +33,7 @@ class DorisSqlReaderSuite extends AnyFunSuite {
       limit = Some(10))
 
     assert(DorisSqlReader.query(config) ==
-      "SELECT job_name, details FROM temp.dim_dg_58dp_job_info_full_1d " +
+      "SELECT schedule_id, job_name, details FROM temp.dim_dg_58dp_job_info_full_1d " +
         "WHERE dt = '2026-04-14' ORDER BY job_name ASC LIMIT 10")
   }
 
@@ -47,7 +47,7 @@ class DorisSqlReaderSuite extends AnyFunSuite {
     assert(query.contains("AND coalesce(sql, '') <> ''"))
     assert(query.contains("AND job_status_id = 1"))
     assert(query.contains("AND job_type_id IN (3, 16)"))
-    assert(query.contains("ORDER BY job_name ASC"))
-    assert(query.contains("LIMIT 10000"))
+    assert(query.contains("ORDER BY schedule_id ASC"))
+    assert(query.contains("LIMIT 100000"))
   }
 }
